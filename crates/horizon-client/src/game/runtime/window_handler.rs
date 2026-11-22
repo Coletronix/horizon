@@ -33,6 +33,11 @@ impl Game<'_> {
     }
 }
 
+thread_local! {
+    /// Whether a mod's `key_capture` took the last key: then nothing else of the game hears it.
+    static KEY_CAPTURED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// A key, a modifier, a click, the wheel, the pointer or the input method. Resize and close are
 /// not, so a person can still close the window. A modifier change counts: `reconcile` would
 /// release a Shift or Ctrl the run holds.
@@ -191,6 +196,32 @@ impl Game<'_> {
         // Who caused it, before the event is handled: the trace wants the
         // window's own keys, never the ones the socket made up.
         self.trace_window_event(origin, &event);
+        // A mod that gave the keyboard to something else takes the key before anything here
+        // sees it, held-key tracking included.
+        KEY_CAPTURED.set(false);
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event {
+            let name = match key.physical_key {
+                PhysicalKey::Code(code) => horizon_client::keybinds::key_name(code),
+                PhysicalKey::Unidentified(_) => None,
+            };
+            let action = match (key.state, key.repeat) {
+                (ElementState::Released, _) => mod_api::KeyAction::Release,
+                (_, false) => mod_api::KeyAction::Press,
+                (_, true) => mod_api::KeyAction::Repeat,
+            };
+            let mut canceled = false;
+            self.native_key_capture(
+                name.unwrap_or("key.keyboard.unknown"),
+                horizon_client::keybinds::raw_key_code(key.physical_key),
+                action,
+                glfw_modifiers(self.modifiers),
+                &mut canceled,
+            );
+            if canceled {
+                KEY_CAPTURED.set(true);
+                return;
+            }
+        }
         if let WindowEvent::KeyboardInput { event, .. } = &event
             && let PhysicalKey::Code(key) = event.physical_key
         {
@@ -458,7 +489,7 @@ impl ApplicationHandler for Game<'_> {
             None
         };
         self.handle_window_event(event_loop, id, event, input_trace::InputOrigin::User);
-        if let Some((event, modifiers)) = key {
+        if let Some((event, modifiers)) = key.filter(|_| !KEY_CAPTURED.get()) {
             use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
             let name = match event.physical_key {
                 PhysicalKey::Code(code) => horizon_client::keybinds::key_name(code),

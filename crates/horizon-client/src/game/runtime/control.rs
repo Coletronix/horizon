@@ -343,6 +343,12 @@ impl Game<'_> {
         // A tap's or an up's release must run even when a dialog, the sign
         // editor or a screen consumes the key, there is no world, or a
         // command handler returns an error: a lost release keeps Shift down.
+        // A mod that took the keyboard (`key_capture`) takes the socket's keys too, as the window's.
+        if let Some((key, action)) = socket_key(line)
+            && self.socket_key_captured(key, action)
+        {
+            return Ok(None);
+        }
         let released = released_modifier(line);
         // The socket's own key, mouse and typing commands are input, as the window's events are.
         let input = matches!(
@@ -906,20 +912,42 @@ impl Game<'_> {
                 if matches!(action, "up" | "click") {
                     self.mod_mappings_button(button, false);
                 }
+                // As a window's click, a mod's `mouse_button_pre` may take it first.
+                let glfw = match button {
+                    MouseButton::Left => 0,
+                    MouseButton::Right => 1,
+                    _ => 2,
+                };
+                let modifiers = super::glfw_modifiers(self.modifiers);
+                let taken = |game: &mut Self, pressed: bool| {
+                    let mut canceled = false;
+                    game.native_mouse_button_pre(glfw, pressed, modifiers, &mut canceled);
+                    canceled
+                };
                 match action {
                     "down" => {
-                        self.extras_mouse(button, true);
-                        self.mouse_mapping(button, true, Source::Agent)?
+                        if !taken(self, true) {
+                            self.extras_mouse(button, true);
+                            self.mouse_mapping(button, true, Source::Agent)?
+                        }
                     }
                     "up" => {
-                        self.extras_mouse(button, false);
-                        self.mouse_mapping(button, false, Source::Agent)?
+                        if !taken(self, false) {
+                            self.extras_mouse(button, false);
+                            self.mouse_mapping(button, false, Source::Agent)?
+                        }
                     }
                     "click" => {
-                        self.extras_mouse(button, true);
-                        self.extras_mouse(button, false);
-                        self.mouse_mapping(button, true, Source::Agent)?;
-                        self.mouse_mapping(button, false, Source::Agent)?;
+                        let down = !taken(self, true);
+                        let up = !taken(self, false);
+                        if down {
+                            self.extras_mouse(button, true);
+                            self.mouse_mapping(button, true, Source::Agent)?;
+                        }
+                        if up {
+                            self.extras_mouse(button, false);
+                            self.mouse_mapping(button, false, Source::Agent)?;
+                        }
                     }
                     other => {
                         return Err(
@@ -1733,6 +1761,28 @@ fn vendor_name(id: u32) -> String {
 
 /// The key a `key <name> tap|up` command releases, whatever its handler does.
 /// A `key KEY down|up|tap|repeat` line's key and action.
+impl Game<'_> {
+    /// Whether a mod's `key_capture` took every event of the socket's `key KEY ACTION`.
+    fn socket_key_captured(&mut self, key: KeyCode, action: &str) -> bool {
+        let actions: &[mod_api::KeyAction] = match action {
+            "down" => &[mod_api::KeyAction::Press],
+            "repeat" => &[mod_api::KeyAction::Repeat],
+            "up" => &[mod_api::KeyAction::Release],
+            _ => &[mod_api::KeyAction::Press, mod_api::KeyAction::Release],
+        };
+        let name = horizon_client::keybinds::key_name(key).unwrap_or("key.keyboard.unknown");
+        let raw_code = horizon_client::keybinds::raw_key_code(winit::keyboard::PhysicalKey::Code(key));
+        let modifiers = super::glfw_modifiers(self.modifiers);
+        let mut all = true;
+        for action in actions {
+            let mut canceled = false;
+            self.native_key_capture(name, raw_code, *action, modifiers, &mut canceled);
+            all &= canceled;
+        }
+        all
+    }
+}
+
 fn socket_key(line: &str) -> Option<(KeyCode, &str)> {
     let mut words = line.split_whitespace();
     match (words.next(), words.next(), words.next()) {
