@@ -217,6 +217,9 @@ pub struct State {
     xwayland_started: bool,
     /// X11 menus and tooltips (override-redirect windows) on screen.
     x11_menus: Vec<X11Surface>,
+    /// The pointer's image as the program under it set it, and what the game was last told.
+    cursor: CursorImageStatus,
+    cursor_sent: Option<(Option<SurfaceId>, [i32; 2])>,
     /// Text programs copied, from the threads that read it.
     clipboard_in: calloop::channel::Sender<String>,
     /// Names this run of the session for the game ([`ToGame::Hello`]).
@@ -372,6 +375,8 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
         xwayland_shell,
         xwayland_started: false,
         x11_menus: Vec::new(),
+        cursor: CursorImageStatus::default_named(),
+        cursor_sent: None,
         clipboard_in,
         held_spawns: options.spawn.clone(),
     };
@@ -552,6 +557,7 @@ impl State {
                     self.offer_dmabufs(&caps);
                 }
                 self.game_gone = None;
+                self.cursor_sent = None;
                 let socket = self.socket_name.clone();
                 if let Some(game) = &mut self.game {
                     game.ready = true;
@@ -722,6 +728,39 @@ impl State {
         if !self.game_ready() && self.last_idle_frame.elapsed() >= IDLE_FRAME {
             self.last_idle_frame = Instant::now();
             self.frame_done();
+        }
+    }
+
+    /// Tell the game the pointer's image when it changed: a cursor surface with pixels, else
+    /// none (the game's own crosshair stands for the pointer).
+    fn send_cursor(&mut self) {
+        let cursor = match &self.cursor {
+            CursorImageStatus::Surface(surface) => with_states(surface, |states| {
+                let id = states
+                    .data_map
+                    .get::<Mutex<SurfaceData>>()
+                    .map(|d| d.lock().unwrap_or_else(|p| p.into_inner()))
+                    .filter(|d| d.mapped)
+                    .map(|d| d.id);
+                let hotspot = states
+                    .data_map
+                    .get::<smithay::input::pointer::CursorImageSurfaceData>()
+                    .map(|a| a.lock().unwrap_or_else(|p| p.into_inner()).hotspot)
+                    .unwrap_or_default();
+                (id, [hotspot.x, hotspot.y])
+            }),
+            _ => (None, [0, 0]),
+        };
+        if self.cursor_sent != Some(cursor) && self.game_ready() {
+            self.cursor_sent = Some(cursor);
+            self.send(
+                ToGame::Cursor {
+                    surface: cursor.0,
+                    hotspot: cursor.1,
+                },
+                &[],
+                Vec::new(),
+            );
         }
     }
 
@@ -1226,6 +1265,7 @@ impl State {
         }
         self.logged = shapes;
         self.send(ToGame::Windows(windows), &[], Vec::new());
+        self.send_cursor();
     }
 }
 
@@ -1771,7 +1811,10 @@ impl SeatHandler for State {
 
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor = image;
+        self.dirty = true;
+    }
 }
 
 impl OutputHandler for State {}

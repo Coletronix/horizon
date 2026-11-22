@@ -19,7 +19,7 @@ use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 
 /// Bumped when a message changes shape; both ends refuse a peer with another version.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// The variable the session sets for the game it starts: its control socket's path.
 pub const SESSION_ENV: &str = "HORIZON_SESSION";
@@ -201,6 +201,12 @@ pub enum ToGame {
     Windows(Vec<WindowInfo>),
     /// A program of the session copied this text: it goes on the desktop's clipboard.
     Clipboard { text: String },
+    /// The pointer's image: a surface the program drew (its pixels arrive as any surface's),
+    /// with the point of it that is the pointer's position, in its logical pixels; or none.
+    Cursor {
+        surface: Option<SurfaceId>,
+        hotspot: [i32; 2],
+    },
 }
 
 const PREFIX: usize = 12;

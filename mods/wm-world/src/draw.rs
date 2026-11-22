@@ -76,6 +76,7 @@ pub fn world(state: &State, windows: &[Window], event: &mut RenderLevelStageEven
         ghost(placed, drag.asked, event);
     }
     leads(state, eye, event);
+    cursor(state, event);
 }
 
 /// The slab: back and sides, the bezel and the dark screen behind the window's pixels.
@@ -218,6 +219,46 @@ fn layers(placed: &Placed, window: &Window, event: &mut RenderLevelStageEvent<'_
             .draw
             .live_quads(&layer.texture, &[quad], WorldDepth::Tested);
     }
+}
+
+/// The pointer's image where the pointer is on a window's screen, over the window and its menus.
+fn cursor(state: &State, event: &mut RenderLevelStageEvent<'_>) {
+    let Some((window, at)) = state.pointer else {
+        return;
+    };
+    let Some(placed) = state.placed(window).filter(|p| state.here(p)) else {
+        return;
+    };
+    let Some(cursor) = wayland_wm::wm().and_then(|wm| wm.cursor()) else {
+        return;
+    };
+    let [w, h] = cursor.texture.size();
+    if w == 0 || h == 0 {
+        return;
+    }
+    let hw = f64::from(placed.size[0]) * placed.pixel / 2.0;
+    let hh = f64::from(placed.size[1]) * placed.pixel / 2.0;
+    let x0 = at[0] - f64::from(cursor.hotspot[0]);
+    let y0 = at[1] - f64::from(cursor.hotspot[1]);
+    let (x1, y1) = (x0 + f64::from(w), y0 + f64::from(h));
+    let z = DEPTH / 2.0 + 0.01;
+    let corner = |x: f64, y: f64| {
+        placed
+            .pose
+            .at(-hw + x * placed.pixel, hh - y * placed.pixel, z)
+    };
+    let quad = PipelineQuad::spanning(
+        [
+            corner(x0, y0),
+            corner(x0, y1),
+            corner(x1, y1),
+            corner(x1, y0),
+        ],
+        0xFFFFFFFF,
+    );
+    let _ = event
+        .draw
+        .live_quads(&cursor.texture, &[quad], WorldDepth::Tested);
 }
 
 /// Each lead, from the top of its window to what holds it: the player's hand or a post.

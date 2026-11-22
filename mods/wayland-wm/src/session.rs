@@ -272,6 +272,12 @@ fn serve(wm: &Wm, stream: UnixStream) -> std::io::Result<()> {
                         .retain(|(s, ..)| *s != surface);
                 }
                 ToGame::Clipboard { text } => wm.copied(text),
+                ToGame::Cursor { surface, hotspot } => {
+                    let texture = surface
+                        .and_then(|id| surfaces.get(&id))
+                        .map(|s| s.texture.clone());
+                    wm.set_cursor(texture.map(|texture| crate::Cursor { texture, hotspot }));
+                }
                 ToGame::Windows(list) => {
                     let windows = list
                         .into_iter()

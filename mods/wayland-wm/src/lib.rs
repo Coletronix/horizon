@@ -104,6 +104,14 @@ pub fn register_presenter(presenter: Arc<dyn Presenter>) {
         .push(presenter);
 }
 
+/// The pointer's image a program set: draw it at the pointer, `hotspot` (its logical pixels)
+/// on the pointer's position. Its size is its texture's.
+#[derive(Clone, Debug)]
+pub struct Cursor {
+    pub texture: LiveTexture,
+    pub hotspot: [i32; 2],
+}
+
 /// The clipboard bridge between the session's programs and the desktop the game runs on.
 #[derive(Default)]
 struct Clipboard {
@@ -121,6 +129,7 @@ pub struct Wm {
     /// The clipboard as the session and the desktop last agreed on it, and text a program
     /// copied that the desktop doesn't have yet.
     clipboard: Mutex<Clipboard>,
+    cursor: Mutex<Option<Cursor>>,
     instance: AtomicU64,
     windows: Mutex<Arc<Vec<Window>>>,
     generation: AtomicU64,
@@ -143,6 +152,7 @@ fn start() -> Option<&'static Wm> {
         let wm: &'static Wm = Box::leak(Box::new(Wm {
             socket: Mutex::new(None),
             clipboard: Mutex::new(Clipboard::default()),
+            cursor: Mutex::new(None),
             instance: AtomicU64::new(0),
             windows: Mutex::new(Arc::new(Vec::new())),
             generation: AtomicU64::new(0),
@@ -215,6 +225,20 @@ impl Wm {
     fn disconnected(&self) {
         *self.socket.lock().unwrap_or_else(|p| p.into_inner()) = None;
         self.publish(Vec::new());
+    }
+
+    /// The pointer's image the program under the pointer set, if it drew one: presenters draw
+    /// it where they show the pointer.
+    pub fn cursor(&self) -> Option<Cursor> {
+        self.cursor
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn set_cursor(&self, cursor: Option<Cursor>) {
+        *self.cursor.lock().unwrap_or_else(|p| p.into_inner()) = cursor;
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
