@@ -3,9 +3,9 @@ use crate::space::{self, BEZEL, DEPTH, Part, V3};
 use crate::{HAND_REACH, MINE_TIME, Placed, State};
 use mod_api::{
     ClientHost, DrawContext, PipelineQuad, RenderLevelStage, RenderLevelStageEvent, Text,
-    WorldDepth, WorldLine, WorldQuad,
+    WorldDepth, WorldLine,
 };
-use wayland_wm::Window;
+use wayland_wm::{LivePixelFormat, LiveTexture, Window};
 
 const BEZEL_COLOUR: u32 = 0xFF1D1D22;
 const BEZEL_HOVER: u32 = 0xFF34343C;
@@ -14,6 +14,16 @@ const BEZEL_MINED: u32 = 0xFF8C2F2A;
 const SIDE_COLOUR: u32 = 0xFF17171B;
 const BACK_COLOUR: u32 = 0xFF26262C;
 const SCREEN_OFF: u32 = 0xFF050506;
+
+/// One white texel, tinted to colour the slabs.
+fn white() -> &'static LiveTexture {
+    static WHITE: std::sync::OnceLock<LiveTexture> = std::sync::OnceLock::new();
+    WHITE.get_or_init(|| {
+        let texture = LiveTexture::new(1, 1);
+        texture.write(1, 1, 4, LivePixelFormat::Rgba8, &[255; 4], &[]);
+        texture
+    })
+}
 
 fn lerp(a: u32, b: u32, t: f64) -> u32 {
     let t = t.clamp(0.0, 1.0);
@@ -144,11 +154,13 @@ fn slab(state: &State, placed: &Placed, eye: V3, event: &mut RenderLevelStageEve
     let facing =
         |corners: &[V3; 4], normal: V3| space::dot(normal, space::sub(eye, corners[0])) > 0.0;
     faces.sort_by_key(|(corners, _, normal)| facing(corners, *normal));
-    let quads: Vec<WorldQuad> = faces
+    // Drawn as live quads, as the screens are: one queue, in order, so a nearer window's slab
+    // covers a farther window's screen (plain quads would all go before every screen).
+    let quads: Vec<PipelineQuad> = faces
         .into_iter()
-        .map(|(corners, colour, _)| WorldQuad::new(corners, colour, WorldDepth::Tested))
+        .map(|(corners, colour, _)| PipelineQuad::spanning(corners, colour))
         .collect();
-    let _ = event.draw.quads(&quads);
+    let _ = event.draw.live_quads(white(), &quads, WorldDepth::Tested);
 }
 
 /// The window's surfaces on the front face, popups a little in front of the window. The window's
