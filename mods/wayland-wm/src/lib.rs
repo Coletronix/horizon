@@ -105,14 +105,21 @@ pub enum Input {
 
 /// What a presenter draws each frame. Every method has an empty default.
 pub trait Presenter: Send + Sync + 'static {
-    /// Draw on the GUI, over everything else, once a frame.
-    fn draw_gui(&self, wm: &Wm, windows: &[Window], draw: &mut dyn DrawContext) {
-        let _ = (wm, windows, draw);
+    /// Draw on the GUI, over everything else, once a frame. `host` is the game: its camera, its
+    /// screen, the player.
+    fn draw_gui(&self, host: &dyn ClientHost, wm: &Wm, windows: &[Window], draw: &mut dyn DrawContext) {
+        let _ = (host, wm, windows, draw);
     }
     /// Draw in the world, at each of a world view's stages (`event.stage`): windows on blocks,
     /// floating panels. [`mod_api::WorldDrawContext::live_quads`] draws a layer's texture.
-    fn draw_world(&self, wm: &Wm, windows: &[Window], event: &mut RenderLevelStageEvent<'_>) {
-        let _ = (wm, windows, event);
+    fn draw_world(
+        &self,
+        host: &dyn ClientHost,
+        wm: &Wm,
+        windows: &[Window],
+        event: &mut RenderLevelStageEvent<'_>,
+    ) {
+        let _ = (host, wm, windows, event);
     }
 }
 
@@ -262,7 +269,7 @@ impl Hooks for WaylandWm {
         }
     }
 
-    fn render_level_stage(&self, _host: &dyn ClientHost, event: &mut RenderLevelStageEvent<'_>) {
+    fn render_level_stage(&self, host: &dyn ClientHost, event: &mut RenderLevelStageEvent<'_>) {
         let Some(wm) = wm() else { return };
         let presenters = PRESENTERS.read().unwrap_or_else(|p| p.into_inner()).clone();
         if presenters.is_empty() {
@@ -270,11 +277,11 @@ impl Hooks for WaylandWm {
         }
         let windows = wm.windows();
         for presenter in &presenters {
-            presenter.draw_world(wm, &windows, event);
+            presenter.draw_world(host, wm, &windows, event);
         }
     }
 
-    fn gui_render_post(&self, _host: &dyn ClientHost, event: &mut GuiRenderPostEvent<'_>) {
+    fn gui_render_post(&self, host: &dyn ClientHost, event: &mut GuiRenderPostEvent<'_>) {
         let Some(wm) = wm() else { return };
         let presenters = PRESENTERS.read().unwrap_or_else(|p| p.into_inner()).clone();
         if presenters.is_empty() {
@@ -282,7 +289,7 @@ impl Hooks for WaylandWm {
         }
         let windows = wm.windows();
         for presenter in &presenters {
-            presenter.draw_gui(wm, &windows, &mut *event.batch);
+            presenter.draw_gui(host, wm, &windows, &mut *event.batch);
         }
     }
 }

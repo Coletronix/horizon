@@ -1,7 +1,7 @@
 //! A debug presenter: every window drawn side by side on the HUD, scaled to fit. It takes no
 //! input; it shows that windows reach the game. Turned on by `HORIZON_WM_OVERLAY=1`.
 use crate::{Presenter, Window, Wm};
-use mod_api::DrawContext;
+use mod_api::{ClientHost, DrawContext};
 
 pub(crate) fn enabled() -> bool {
     std::env::var("HORIZON_WM_OVERLAY").is_ok_and(|v| v == "1")
@@ -10,7 +10,7 @@ pub(crate) fn enabled() -> bool {
 pub(crate) struct Overlay;
 
 impl Presenter for Overlay {
-    fn draw_gui(&self, _wm: &Wm, windows: &[Window], draw: &mut dyn DrawContext) {
+    fn draw_gui(&self, _host: &dyn ClientHost, _wm: &Wm, windows: &[Window], draw: &mut dyn DrawContext) {
         let shown: Vec<&Window> = windows.iter().filter(|w| w.mapped()).collect();
         if shown.is_empty() {
             return;
