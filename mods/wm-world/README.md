@@ -12,6 +12,7 @@ with the game's own controls.
 | Stop typing | Look away (keys are the game's again; look back and they're the window's), or press the release key (Super, rebindable in Controls), or hold Escape for a second |
 | Scroll | The wheel over a screen scrolls it |
 | Carry | Right-click the bezel, back or a side; the wheel brings it nearer or pushes it away; right-click sets it down |
+| Line up | Set a carried window down beside another: it snaps against its side, tops level, turned a little towards you so a row curves around you ("Curved rows" turns that off) |
 | Resize | Sneak and right-click the bezel near an edge or corner, drag, let go |
 | Put away | Hold attack on the bezel: the window leaves the world and its program is suspended |
 | Bring back | The recall key (R) brings the last window put away in front of you; with none put away, the farthest window (one lost behind a wall or far away) |

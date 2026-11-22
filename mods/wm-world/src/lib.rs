@@ -36,6 +36,10 @@ use std::time::Instant;
 use wayland_wm::{Input, Presenter, Window, WindowId, Wm, button};
 
 const MOD_ID: &str = "wm_world";
+/// The setting that curves snapped rows towards the player (on unless turned off).
+const CURVE_SETTING: &str = "curved_rows";
+/// How far each window snapped beside another turns towards the row's viewer, in degrees.
+const ROW_CURVE: f32 = 20.0;
 /// The setting that shows the hints on the HUD (on unless turned off).
 const HINTS_SETTING: &str = "hints";
 /// How far the crosshair reaches windows to point at them, in blocks.
@@ -883,9 +887,16 @@ impl WmWorld {
         if !host.playing() {
             return Flow::Continue;
         }
-        // Setting a carried window down.
-        if state.carry.is_some() && button == button::RIGHT {
-            state.carry = None;
+        // Setting a carried window down: beside another, it snaps to it.
+        if button == button::RIGHT
+            && let Some(carry) = state.carry.take()
+        {
+            let arc = if host.setting(MOD_ID, CURVE_SETTING).as_deref() == Some("false") {
+                0.0
+            } else {
+                ROW_CURVE
+            };
+            snap(&mut state, carry.window, arc);
             state.changed();
             return Flow::Cancel;
         }
@@ -954,6 +965,49 @@ impl WmWorld {
                 Flow::Cancel
             }
         }
+    }
+}
+
+/// Set `window` against the side of the nearest window it was put down beside: within half a
+/// block of that side, turned much the same way. `arc` turns it towards the row's viewer.
+fn snap(state: &mut State, window: WindowId, arc: f32) {
+    const REACH: f64 = 0.5;
+    let Some(moved) = state.placed(window).cloned() else {
+        return;
+    };
+    let half = |p: &Placed| {
+        [
+            f64::from(p.size[0]) * p.pixel / 2.0 + space::BEZEL,
+            f64::from(p.size[1]) * p.pixel / 2.0 + space::BEZEL,
+        ]
+    };
+    let mh = half(&moved);
+    let mut best: Option<(f64, Pose)> = None;
+    for other in state
+        .placed
+        .iter()
+        .filter(|p| p.window != window && state.here(p))
+    {
+        let turn = (moved.pose.yaw - other.pose.yaw + 540.0).rem_euclid(360.0) - 180.0;
+        if turn.abs() > 60.0 || (moved.pose.pitch - other.pose.pitch).abs() > 30.0 {
+            continue;
+        }
+        let oh = half(other);
+        for (side, sign) in [(space::Side::Right, 1.0), (space::Side::Left, -1.0)] {
+            // The other's side, and the moved window's facing side, at mid height.
+            let theirs = other.pose.at(sign * oh[0], 0.0, 0.0);
+            let ours = moved.pose.at(-sign * mh[0], 0.0, 0.0);
+            let d = space::sub(theirs, ours);
+            let gap = space::dot(d, d).sqrt();
+            if gap < REACH && best.is_none_or(|(g, _)| gap < g) {
+                best = Some((gap, space::snapped(&other.pose, oh, mh, side, arc)));
+            }
+        }
+    }
+    if let Some((_, pose)) = best
+        && let Some(placed) = state.placed_mut(window)
+    {
+        placed.pose = pose;
     }
 }
 
@@ -1058,6 +1112,12 @@ impl Hooks for Hooked {
             .tooltip("wm_world.setting.hints.tooltip");
         if let Err(error) = r.register_setting(hints) {
             log::warn!("wm_world: the hints setting wasn't registered: {error:?}");
+        }
+        let curve =
+            mod_api::SettingSpec::toggle(CURVE_SETTING, "wm_world.setting.curved_rows", true)
+                .tooltip("wm_world.setting.curved_rows.tooltip");
+        if let Err(error) = r.register_setting(curve) {
+            log::warn!("wm_world: the curved rows setting wasn't registered: {error:?}");
         }
         r.register_key_mapping(
             KeyRegistration::new("recall", "key.keyboard.r").label("key.wm_world.recall"),

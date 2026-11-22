@@ -251,6 +251,41 @@ pub fn separation(a: &Pose, a_half: V3, b: &Pose, b_half: V3) -> Option<V3> {
     best.map(|(_, push)| push)
 }
 
+/// Which side of a window another is snapped to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+/// Where a window of half size `half` (its bezel included) goes to stand against `side` of
+/// `target` (half size `target_half`), tops aligned, turned `arc` degrees towards whoever faces
+/// the row, with a small gap so their slabs don't touch.
+pub fn snapped(target: &Pose, target_half: [f64; 2], half: [f64; 2], side: Side, arc: f32) -> Pose {
+    const GAP: f64 = 0.04;
+    let sign = match side {
+        Side::Right => 1.0,
+        Side::Left => -1.0,
+    };
+    let yaw = target.yaw + arc * sign as f32;
+    let pose = Pose {
+        centre: [0.0; 3],
+        yaw,
+        pitch: target.pitch,
+    };
+    // The shared edge, top-aligned: on the target's side, at its top less the new one's half.
+    let edge = target.at(
+        sign * (target_half[0] + GAP / 2.0),
+        target_half[1] - half[1],
+        0.0,
+    );
+    let right = pose.basis().right;
+    Pose {
+        centre: add(edge, mul(right, sign * (half[0] + GAP / 2.0))),
+        ..pose
+    }
+}
+
 /// `degrees` to the nearest multiple of `step`.
 pub fn snap(degrees: f32, step: f32) -> f32 {
     (degrees / step).round() * step
@@ -344,6 +379,31 @@ mod tests {
         };
         let push = separation(&a, half, &d, half).unwrap();
         assert!(push[2] < 0.0 && push[0].abs() < 1e-9, "{push:?}");
+    }
+
+    #[test]
+    fn a_snapped_window_stands_against_the_side_tops_aligned() {
+        let target = ahead();
+        let pose = snapped(&target, [0.5, 0.25], [0.25, 0.125], Side::Right, 0.0);
+        // Right of the target as its viewer sees it (-x), its left edge on the target's right
+        // one with the gap between, tops level, in the same plane.
+        assert!(
+            (pose.centre[0] - -(0.5 + 0.04 + 0.25)).abs() < 1e-9,
+            "{pose:?}"
+        );
+        assert!((pose.centre[1] - (0.25 - 0.125)).abs() < 1e-9);
+        assert!((pose.centre[2] - 2.0).abs() < 1e-9);
+        // Curved: turned towards the viewer, the shared edge staying put.
+        let curved = snapped(&target, [0.5, 0.25], [0.25, 0.125], Side::Right, 20.0);
+        assert_eq!(curved.yaw, 20.0);
+        let edge = curved.at(-0.25 - 0.02, 0.0, 0.0);
+        assert!(
+            (edge[0] - -(0.5 + 0.02)).abs() < 1e-9 && (edge[2] - 2.0).abs() < 1e-9,
+            "{edge:?}"
+        );
+        // Separate slabs: the gap keeps them from pushing each other.
+        let half = |w: f64, h: f64| [w, h, DEPTH / 2.0];
+        assert!(separation(&target, half(0.5, 0.25), &pose, half(0.25, 0.125)).is_none());
     }
 
     #[test]
