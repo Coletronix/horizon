@@ -2154,6 +2154,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-dmabuf"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "horizon-live-texture",
+ "libc",
+ "log",
+ "wgpu",
+]
+
+[[package]]
 name = "horizon-dualsense"
 version = "0.1.0"
 dependencies = [

@@ -95,6 +95,7 @@
     "horizon-hot-paths-game": "tool",
     "horizon-modding-examples": "tool",
     "horizon-hooks": "engine",
+    "horizon-dmabuf": "engine",
     "horizon-live-texture": "engine",
     "mod-wayland_wm": "horizon",
     "wayland-wm-dev": "tool",

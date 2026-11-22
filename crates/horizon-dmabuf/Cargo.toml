@@ -1,0 +1,17 @@
+[package]
+name = "horizon-dmabuf"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Linux dmabufs into the renderer without a CPU copy: what the GPU imports, and the import itself (Vulkan)"
+
+[dependencies]
+horizon-live-texture = { path = "../horizon-live-texture" }
+log = "0.4"
+wgpu = { version = "30.0.1", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["vulkan"] }
+# The version wgpu-hal already uses.
+ash = { version = "0.38", default-features = false }
+libc = "0.2"

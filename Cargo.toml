@@ -8,6 +8,7 @@ members = [
     "crates/horizon-telemetry",
     "crates/horizon-hooks",
     "crates/horizon-live-texture",
+    "crates/horizon-dmabuf",
     "mods/wayland-wm",
     "mods/wayland-wm/dev",
     "crates/horizon-mod-host",

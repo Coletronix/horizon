@@ -108,6 +108,9 @@ pub struct DmabufPlane {
 /// A Linux dmabuf the renderer may import without a copy.
 #[derive(Debug)]
 pub struct Dmabuf {
+    /// The producer's buffer this is, unique in the process: a renderer may keep its import and
+    /// reuse it when the same buffer comes back (clients cycle two to four).
+    pub id: u64,
     pub width: u32,
     pub height: u32,
     /// The DRM fourcc code (`DRM_FORMAT_ARGB8888`...).
@@ -217,6 +220,8 @@ struct Inner {
     state: Mutex<State>,
     /// Bumped on every change, so a renderer can skip the lock when nothing changed.
     generation: AtomicU64,
+    /// The last generation the GPU has finished copying out of its source.
+    consumed: AtomicU64,
 }
 
 impl std::fmt::Debug for LiveTexture {
@@ -255,6 +260,7 @@ impl LiveTexture {
                     log_since: 1,
                 }),
                 generation: AtomicU64::new(1),
+                consumed: AtomicU64::new(0),
             }),
         }
     }
@@ -363,6 +369,17 @@ impl LiveTexture {
         state.log_since = generation;
     }
 
+    /// The last generation whose source the GPU has finished reading: a producer may reuse a
+    /// dmabuf it gave at that generation or before.
+    pub fn consumed(&self) -> u64 {
+        self.inner.consumed.load(Ordering::Acquire)
+    }
+
+    /// For the renderer: the GPU has finished reading the source of `generation`.
+    pub fn mark_consumed(&self, generation: u64) {
+        self.inner.consumed.fetch_max(generation, Ordering::AcqRel);
+    }
+
     /// For the renderer: what changed since `generation` (0 for a texture it hasn't seen),
     /// holding the texture's lock until the returned value drops. Producers wait meanwhile, so
     /// upload and drop it promptly.
@@ -374,6 +391,46 @@ impl LiveTexture {
             guard,
         }
     }
+}
+
+/// A dmabuf layout the renderer can import: a DRM fourcc and format modifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DmabufFormat {
+    pub fourcc: u32,
+    pub modifier: u64,
+}
+
+/// What dmabufs the renderer imports: its GPU's DRM device and the layouts it reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DmabufCaps {
+    /// The `dev_t` of the GPU's DRM node (its render node when it has one): where producers
+    /// should allocate.
+    pub device: u64,
+    pub formats: Vec<DmabufFormat>,
+}
+
+static CAPS: Mutex<Option<DmabufCaps>> = Mutex::new(None);
+
+/// For the renderer: publish what it imports, or `None` when it imports no dmabufs (not
+/// Vulkan, a driver without the extensions). A new device publishes again.
+pub fn set_dmabuf_caps(caps: Option<DmabufCaps>) {
+    *CAPS.lock().unwrap_or_else(|p| p.into_inner()) = caps;
+}
+
+/// What dmabufs the renderer imports now; `None` before it started or when it can't.
+pub fn dmabuf_caps() -> Option<DmabufCaps> {
+    CAPS.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// DRM fourcc codes of the 8-bit RGB layouts.
+pub mod fourcc {
+    const fn code(c: &[u8; 4]) -> u32 {
+        u32::from_le_bytes(*c)
+    }
+    pub const ARGB8888: u32 = code(b"AR24");
+    pub const XRGB8888: u32 = code(b"XR24");
+    pub const ABGR8888: u32 = code(b"AB24");
+    pub const XBGR8888: u32 = code(b"XB24");
 }
 
 /// Copy `region` from a producer's frame into the RGBA mirror.
