@@ -691,6 +691,7 @@ impl WmWorld {
             4 => button::EXTRA,
             _ => return Flow::Continue,
         };
+        wm.player_input(host);
         let mut state = self.lock();
         log::debug!(
             "wm_world: button {button:#x} {} gaze {:?} sneaking {sneaking}",
@@ -937,6 +938,7 @@ impl Hooks for Hooked {
         let Some(wm) = wayland_wm::wm() else {
             return Flow::Continue;
         };
+        wm.player_input(host);
         let mut state = this().lock();
         let code = event.raw_code;
         // The release key (Super unless rebound) gives the keyboard back to the game, whatever

@@ -61,6 +61,9 @@ if let Some(wm) = wayland_wm::wm() {
   left of the window's visible area; client-side shadows lie outside it.
 - **Input** (`Input`): pointer motion over a window, buttons, scrolling, keys, keyboard focus,
   resize and close requests.
+- **Clipboard**: call `Wm::player_input(host)` from your key and click hooks (the only moments
+  the game lets a mod reach the clipboard). Text a program copies then goes on the desktop's
+  clipboard, and the desktop's text is offered to programs when a window gets the keyboard.
 - **Programs**: `Wm::spawn` asks the session to start a shell command with its `WAYLAND_DISPLAY`
   and the toolkit variables that make GTK, Qt, SDL, Firefox and Electron use it. The program
   belongs to the session.
@@ -94,5 +97,5 @@ HORIZON_WM_OVERLAY=1 HORIZON_WM_SPAWN=foot \
   the camera started.
 - `HORIZON_WM_SPAWN`: a program to start in the compositor when the game starts.
 
-Not there yet: XWayland (X11 programs), clipboard and drag and drop, cursor images, popup grabs,
+Not there yet: XWayland (X11 programs), drag and drop, cursor images, popup grabs,
 fractional scale, running as the login session itself (DRM/KMS, libinput, a fallback desktop).

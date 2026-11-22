@@ -19,7 +19,7 @@ use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 
 /// Bumped when a message changes shape; both ends refuse a peer with another version.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// The variable the session sets for the game it starts: its control socket's path.
 pub const SESSION_ENV: &str = "HORIZON_SESSION";
@@ -153,6 +153,10 @@ pub enum ToSession {
     Spawn {
         command: String,
     },
+    /// The desktop's clipboard text: programs of the session paste it.
+    Clipboard {
+        text: String,
+    },
 }
 
 /// What the session tells the game.
@@ -195,6 +199,8 @@ pub enum ToGame {
     Forget { surface: SurfaceId },
     /// Every window now, in the order they were opened.
     Windows(Vec<WindowInfo>),
+    /// A program of the session copied this text: it goes on the desktop's clipboard.
+    Clipboard { text: String },
 }
 
 const PREFIX: usize = 12;

@@ -104,9 +104,23 @@ pub fn register_presenter(presenter: Arc<dyn Presenter>) {
         .push(presenter);
 }
 
+/// The clipboard bridge between the session's programs and the desktop the game runs on.
+#[derive(Default)]
+struct Clipboard {
+    /// The text both sides have.
+    known: Option<String>,
+    /// A program copied this: it goes on the desktop's clipboard on the next frame.
+    copied: Option<String>,
+    /// A window got the keyboard: offer it the desktop's clipboard on the next frame.
+    offer: bool,
+}
+
 /// The game's link to the session ([`wm`]).
 pub struct Wm {
     socket: Mutex<Option<String>>,
+    /// The clipboard as the session and the desktop last agreed on it, and text a program
+    /// copied that the desktop doesn't have yet.
+    clipboard: Mutex<Clipboard>,
     instance: AtomicU64,
     windows: Mutex<Arc<Vec<Window>>>,
     generation: AtomicU64,
@@ -128,6 +142,7 @@ fn start() -> Option<&'static Wm> {
     {
         let wm: &'static Wm = Box::leak(Box::new(Wm {
             socket: Mutex::new(None),
+            clipboard: Mutex::new(Clipboard::default()),
             instance: AtomicU64::new(0),
             windows: Mutex::new(Arc::new(Vec::new())),
             generation: AtomicU64::new(0),
@@ -202,9 +217,45 @@ impl Wm {
         self.publish(Vec::new());
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn copied(&self, text: String) {
+        self.clipboard
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .copied = Some(text);
+    }
+
+    /// Call from a hook that handles the player's key or click (the only moments the game lets
+    /// a mod reach the clipboard): what a program copied goes on the desktop's clipboard, and
+    /// when a window has just been given the keyboard, the desktop's text is offered to the
+    /// session's programs.
+    pub fn player_input(&self, host: &mut dyn ClientHost) {
+        let mut clipboard = self.clipboard.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(text) = clipboard.copied.take() {
+            host.set_clipboard_text(&text);
+            clipboard.known = Some(text);
+        }
+        if std::mem::take(&mut clipboard.offer)
+            && let Some(text) = host.clipboard_text()
+            && clipboard.known.as_ref() != Some(&text)
+        {
+            clipboard.known = Some(text.clone());
+            drop(clipboard);
+            #[cfg(target_os = "linux")]
+            self.link
+                .send(horizon_wm_ipc::ToSession::Clipboard { text });
+        }
+    }
+
     /// Send the session the player's input or a window management decision. Dropped while not
     /// connected.
     pub fn send(&self, input: Input) {
+        if matches!(input, Input::Focus(Some(_))) {
+            self.clipboard
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .offer = true;
+        }
         #[cfg(target_os = "linux")]
         self.link.send(horizon_wm_ipc::ToSession::Input(input));
         #[cfg(not(target_os = "linux"))]

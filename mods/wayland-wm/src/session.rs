@@ -271,6 +271,7 @@ fn serve(wm: &Wm, stream: UnixStream) -> std::io::Result<()> {
                         .unwrap_or_else(|p| p.into_inner())
                         .retain(|(s, ..)| *s != surface);
                 }
+                ToGame::Clipboard { text } => wm.copied(text),
                 ToGame::Windows(list) => {
                     let windows = list
                         .into_iter()

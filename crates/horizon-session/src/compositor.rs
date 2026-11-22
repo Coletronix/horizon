@@ -53,9 +53,10 @@ use smithay::{
         },
         output::{OutputHandler, OutputManagerState},
         selection::{
-            SelectionHandler,
+            SelectionHandler, SelectionSource, SelectionTarget,
             data_device::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                request_data_device_client_selection, set_data_device_selection,
             },
         },
         shell::xdg::{
@@ -147,7 +148,7 @@ pub struct State {
     seat_state: SeatState<Self>,
     _output_manager: OutputManagerState,
     output: Output,
-    _seat: Seat<Self>,
+    seat: Seat<Self>,
     keyboard: KeyboardHandle<Self>,
     pointer: PointerHandle<Self>,
     popups: PopupManager,
@@ -180,6 +181,8 @@ pub struct State {
     /// A menu that asked for a grab, and its window's surface: it has the keyboard, and a click
     /// anywhere else closes it (and every menu of that window).
     popup_grab: Option<(WlSurface, WlSurface)>,
+    /// Text programs copied, from the threads that read it.
+    clipboard_in: calloop::channel::Sender<String>,
     /// Names this run of the session for the game ([`ToGame::Hello`]).
     instance: u64,
     /// `--spawn` programs, held until a game says which GPU buffers it imports (else GPU programs
@@ -229,6 +232,7 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
     );
     output.set_preferred(mode);
     let data_device = DataDeviceState::new::<State>(&dh);
+    let (clipboard_in, copied) = calloop::channel::channel::<String>();
 
     let socket = ListeningSocketSource::new_auto().map_err(|e| e.to_string())?;
     let socket_name = socket.socket_name().to_string_lossy().into_owned();
@@ -267,6 +271,13 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
         )
         .map_err(|e| e.to_string())?;
 
+    handle
+        .insert_source(copied, |event, _, state: &mut State| {
+            if let calloop::channel::Event::Msg(text) = event {
+                state.send(ToGame::Clipboard { text }, &[], Vec::new());
+            }
+        })
+        .map_err(|e| e.to_string())?;
     // Ending the session closes its windows politely, as quitting the game does.
     let signals = calloop::signals::Signals::new(&[
         calloop::signals::Signal::SIGTERM,
@@ -293,7 +304,7 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
         seat_state,
         _output_manager: output_manager,
         output,
-        _seat: seat,
+        seat: seat.clone(),
         keyboard,
         pointer,
         popups: PopupManager::default(),
@@ -319,6 +330,7 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
         stopping: false,
         instance: instance_number(),
         popup_grab: None,
+        clipboard_in,
         held_spawns: options.spawn.clone(),
     };
     let mut supervised = (!options.game.is_empty())
@@ -510,6 +522,11 @@ impl State {
             ToSession::Input(input) => self.input(input),
             ToSession::FrameDone => self.frame_done(),
             ToSession::Consumed { surface, seq } => self.consumed(surface, seq),
+            ToSession::Clipboard { text } => {
+                let mimes = TEXT_MIMES.iter().map(|m| m.to_string()).collect();
+                let seat = self.seat.clone();
+                set_data_device_selection(&self.display, &seat, mimes, std::sync::Arc::new(text));
+            }
             ToSession::Spawn { command } => {
                 let socket = self.socket_name.clone();
                 self.programs.spawn(&command, &socket);
@@ -1587,8 +1604,73 @@ impl OutputHandler for State {}
 // Clipboard and drag and drop between the session's own programs (GTK requires the global).
 // The clipboard of a desktop around a nested session isn't bridged yet.
 impl SelectionHandler for State {
-    type SelectionUserData = ();
+    /// The text the session offers as the clipboard (the game's desktop clipboard).
+    type SelectionUserData = std::sync::Arc<String>;
+
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        seat: Seat<Self>,
+    ) {
+        // A program copied: read its text and hand it to the game for the desktop's clipboard.
+        let (SelectionTarget::Clipboard, Some(source)) = (ty, source) else {
+            return;
+        };
+        let mimes = source.mime_types();
+        let Some(mime) = TEXT_MIMES
+            .iter()
+            .find(|m| mimes.iter().any(|have| have == *m))
+        else {
+            return;
+        };
+        let Ok((read, write)) = std::io::pipe() else {
+            return;
+        };
+        if request_data_device_client_selection(&seat, mime.to_string(), OwnedFd::from(write))
+            .is_err()
+        {
+            return;
+        }
+        let sender = self.clipboard_in.clone();
+        // The program writes when it gets to it: read off the loop, at most a megabyte.
+        let _ = std::thread::Builder::new()
+            .name("clipboard read".into())
+            .spawn(move || {
+                use std::io::Read;
+                let mut text = String::new();
+                if read.take(1 << 20).read_to_string(&mut text).is_ok() && !text.is_empty() {
+                    let _ = sender.send(text);
+                }
+            });
+    }
+
+    fn send_selection(
+        &mut self,
+        _ty: SelectionTarget,
+        _mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        user_data: &Self::SelectionUserData,
+    ) {
+        let text = user_data.clone();
+        let _ = std::thread::Builder::new()
+            .name("clipboard write".into())
+            .spawn(move || {
+                use std::io::Write;
+                let _ = std::fs::File::from(fd).write_all(text.as_bytes());
+            });
+    }
 }
+
+/// The text types the clipboard is offered and read in, preferred first.
+const TEXT_MIMES: &[&str] = &[
+    "text/plain;charset=utf-8",
+    "UTF8_STRING",
+    "text/plain",
+    "TEXT",
+    "STRING",
+];
 
 impl DataDeviceHandler for State {
     fn data_device_state(&self) -> &DataDeviceState {
