@@ -14,7 +14,9 @@
 //! that space; a layer may lie partly outside it (shadows, popups).
 #![deny(unsafe_code)]
 
-use mod_api::{ClientHost, DrawContext, GuiRenderPostEvent, Hooks, RenderFramePostEvent};
+use mod_api::{
+    ClientHost, DrawContext, GuiRenderPostEvent, Hooks, RenderFramePostEvent, RenderLevelStageEvent,
+};
 pub use mod_api::{LivePixelFormat, LiveRegion, LiveTexture};
 use std::sync::{
     Arc, Mutex, OnceLock, RwLock,
@@ -22,6 +24,7 @@ use std::sync::{
 };
 
 mod overlay;
+mod panels;
 #[cfg(target_os = "linux")]
 mod server;
 
@@ -105,6 +108,11 @@ pub trait Presenter: Send + Sync + 'static {
     /// Draw on the GUI, over everything else, once a frame.
     fn draw_gui(&self, wm: &Wm, windows: &[Window], draw: &mut dyn DrawContext) {
         let _ = (wm, windows, draw);
+    }
+    /// Draw in the world, at each of a world view's stages (`event.stage`): windows on blocks,
+    /// floating panels. [`mod_api::WorldDrawContext::live_quads`] draws a layer's texture.
+    fn draw_world(&self, wm: &Wm, windows: &[Window], event: &mut RenderLevelStageEvent<'_>) {
+        let _ = (wm, windows, event);
     }
 }
 
@@ -230,6 +238,9 @@ impl WaylandWm {
             if overlay::enabled() {
                 register_presenter(Arc::new(overlay::Overlay));
             }
+            if panels::enabled() {
+                register_presenter(Arc::new(panels::Panels::default()));
+            }
             if let Ok(command) = std::env::var("HORIZON_WM_SPAWN")
                 && !command.trim().is_empty()
             {
@@ -248,6 +259,18 @@ impl Hooks for WaylandWm {
         self.start_once();
         if let Some(wm) = wm() {
             wm.frame_done();
+        }
+    }
+
+    fn render_level_stage(&self, _host: &dyn ClientHost, event: &mut RenderLevelStageEvent<'_>) {
+        let Some(wm) = wm() else { return };
+        let presenters = PRESENTERS.read().unwrap_or_else(|p| p.into_inner()).clone();
+        if presenters.is_empty() {
+            return;
+        }
+        let windows = wm.windows();
+        for presenter in &presenters {
+            presenter.draw_world(wm, &windows, event);
         }
     }
 

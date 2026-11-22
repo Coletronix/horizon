@@ -6,8 +6,9 @@
 //!   cargo run --profile fast -p wayland-wm-dev -- --resources .local/horizon-client/26.3 --world W
 //! ```
 //!
-//! `HORIZON_WM_OVERLAY=1` draws every window on the HUD; `HORIZON_WM_SPAWN` starts a program
-//! whose windows open in the game.
+//! `HORIZON_WM_OVERLAY=1` draws every window on the HUD, `HORIZON_WM_WORLD=1` stands them up in
+//! the world in front of the camera, and `HORIZON_WM_SPAWN` starts a program whose windows open in
+//! the game.
 #![forbid(unsafe_code)]
 
 fn main() {
