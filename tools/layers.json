@@ -95,6 +95,7 @@
     "horizon-hot-paths-game": "tool",
     "horizon-modding-examples": "tool",
     "horizon-hooks": "engine",
+    "horizon-live-texture": "engine",
     "horizon-game": "platform",
     "horizon-mod-host": "platform",
     "horizon-telemetry": "horizon",
@@ -124,7 +125,8 @@
       "horizon-engine-slots",
       "horizon-threads",
       "horizon-guest-stack",
-      "horizon-java-properties"
+      "horizon-java-properties",
+      "horizon-live-texture"
     ],
     "pending": {
       "_doc": "Engine crates that still take a non-portable crate, until the types they need move down. Entries only go away.",

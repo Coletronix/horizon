@@ -2248,6 +2248,10 @@ name = "horizon-java-properties"
 version = "0.1.0"
 
 [[package]]
+name = "horizon-live-texture"
+version = "0.1.0"
+
+[[package]]
 name = "horizon-mcp"
 version = "0.1.0"
 dependencies = [

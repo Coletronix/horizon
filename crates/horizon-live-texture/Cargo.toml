@@ -1,0 +1,8 @@
+[package]
+name = "horizon-live-texture"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A texture another thread writes while the game draws it: the shared handle between a producer (a mod's compositor, a video) and the renderer"
+
+[dependencies]
