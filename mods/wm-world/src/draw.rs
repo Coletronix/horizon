@@ -349,13 +349,19 @@ pub fn hud(host: &dyn ClientHost, state: &State, windows: &[Window], draw: &mut 
             row,
         );
     }
-    if !state.pocket.is_empty() {
+    // Windows the recall key brings back (the ones that became items come back by their item).
+    let recallable = state
+        .pocket
+        .iter()
+        .filter(|w| !state.itemised.contains(w))
+        .count();
+    if recallable > 0 {
         hint(
             host,
             draw,
             Text::translate(
                 "wm_world.hud.pocket",
-                vec![Text::literal(state.pocket.len().to_string())],
+                vec![Text::literal(recallable.to_string())],
             ),
             row,
         );

@@ -20,6 +20,7 @@
 #![deny(unsafe_code)]
 
 mod draw;
+mod items;
 mod space;
 mod store;
 
@@ -130,6 +131,11 @@ struct State {
     mining: Option<(WindowId, Instant)>,
     /// Put-away windows, the most recent last.
     pocket: Vec<WindowId>,
+    /// Windows just picked up, whose item is to be asked of the server.
+    pick_up: Vec<WindowId>,
+    /// Put-away windows whose item the server gave: the item brings them back, not the recall
+    /// key.
+    itemised: BTreeSet<WindowId>,
     /// The view this frame: eye and direction.
     eye: Option<(V3, V3, f32, f32)>,
     dirty_since: Option<Instant>,
@@ -381,6 +387,7 @@ impl WmWorld {
         self.point(&mut state, wm, playing);
         self.capture(&mut state, wm);
         self.keys(&mut state, wm, host);
+        self.item_traffic(&mut state, wm, &windows, host);
         if state
             .dirty_since
             .is_some_and(|t| t.elapsed().as_secs_f64() > 1.0)
@@ -596,6 +603,7 @@ impl WmWorld {
         if since.elapsed().as_secs_f64() >= MINE_TIME {
             state.mining = None;
             self.pocket(state, wm, window);
+            state.pick_up.push(window);
         }
     }
 
@@ -635,7 +643,15 @@ impl WmWorld {
                 })
                 .map(|p| p.window)
         };
-        let Some(window) = state.pocket.pop().or_else(farthest) else {
+        let in_pocket = state
+            .pocket
+            .iter()
+            .rposition(|w| !state.itemised.contains(w))
+            .map(|i| state.pocket[i]);
+        if let Some(w) = in_pocket {
+            state.pocket.retain(|p| *p != w);
+        }
+        let Some(window) = in_pocket.or_else(farthest) else {
             return;
         };
         let pose = windows
@@ -651,6 +667,77 @@ impl WmWorld {
             visible: true,
         });
         state.changed();
+    }
+
+    /// Ask the server for the items of windows just picked up; close the windows whose items
+    /// were destroyed.
+    fn item_traffic(
+        &self,
+        state: &mut State,
+        wm: &Wm,
+        windows: &[Window],
+        host: &mut dyn ClientHost,
+    ) {
+        for window in std::mem::take(&mut state.pick_up) {
+            let Some(info) = windows.iter().find(|w| w.id == window) else {
+                continue;
+            };
+            let message = items::Message::PickedUp {
+                key: items::WindowKey {
+                    session: state.instance,
+                    window: window.0,
+                },
+                title: info.title.clone(),
+                app_id: info.app_id.clone(),
+            };
+            match host.send_payload_to_server(&items::channel(), message.bytes()) {
+                Ok(_) => {
+                    state.itemised.insert(window);
+                }
+                // A server without this mod: the window stays put away, for the recall key.
+                Err(error) => log::info!("wm_world: no window item ({error:?}): put away only"),
+            }
+        }
+        let closes = std::mem::take(&mut *items::CLOSES.lock().unwrap_or_else(|p| p.into_inner()));
+        for key in closes {
+            if let Some(window) = items::local_window(key, state.instance) {
+                wm.send(Input::Close(window));
+            }
+        }
+    }
+
+    /// A window item was used: its window comes back in front of the player, or, gone, its
+    /// program starts again.
+    fn use_window_item(&self, key: items::WindowKey, app_id: &str) {
+        let Some(wm) = wayland_wm::wm() else { return };
+        let windows = wm.windows();
+        let mut state = self.lock();
+        match items::local_window(key, state.instance)
+            .filter(|w| windows.iter().any(|x| x.id == *w))
+        {
+            Some(window) => {
+                state.itemised.remove(&window);
+                state.pocket.retain(|w| *w != window);
+                let pose = windows
+                    .iter()
+                    .find(|w| w.id == window)
+                    .map(|w| self.place_new(&state, w));
+                if let (Some(pose), Some(placed)) = (pose, state.placed_mut(window)) {
+                    placed.pose = pose;
+                    placed.pocketed = false;
+                }
+                wm.send(Input::Visible {
+                    window,
+                    visible: true,
+                });
+                state.changed();
+            }
+            None if !app_id.is_empty() => {
+                log::info!("wm_world: the window of this item is gone: starting {app_id} again");
+                wm.spawn(&format!("gtk-launch {app_id} 2>/dev/null || {app_id}"));
+            }
+            None => {}
+        }
     }
 
     /// The mod's own keys.
@@ -862,6 +949,14 @@ pub struct Hooked;
 #[mod_api::horizon_mod]
 impl Hooks for Hooked {
     fn register(&self, r: &mut dyn Registrar, _cx: &RegistrationContext) {
+        // Optional: a server without this mod still lets the player in (windows are put away
+        // instead of becoming items).
+        items::set_key(r.item_key(items::WINDOW_ITEM));
+        let (server, client) = items::handlers();
+        r.payload_handlers()
+            .registrar("1")
+            .optional()
+            .play_bidirectional(items::channel(), server, Some(client));
         let hints = mod_api::SettingSpec::toggle(HINTS_SETTING, "wm_world.setting.hints", true)
             .tooltip("wm_world.setting.hints.tooltip");
         if let Err(error) = r.register_setting(hints) {
@@ -877,6 +972,88 @@ impl Hooks for Hooked {
             KeyRegistration::new("terminal", "key.keyboard.grave.accent")
                 .label("key.wm_world.terminal"),
         );
+    }
+
+    fn items(&self, _context: &RegistrationContext, event: &mut mod_api::ItemsEvent<'_>) {
+        items::declare(event.items);
+    }
+
+    fn entity_join_level(
+        &self,
+        host: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::EntityJoinLevelEvent<'_>,
+    ) -> Flow {
+        items::joined(host, event.dimension, event.entity, event.kind, event.pos);
+        Flow::Continue
+    }
+
+    fn entity_leave_level(
+        &self,
+        _host: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::EntityLeaveLevelEvent<'_>,
+    ) {
+        if event.kind == "minecraft:item" {
+            items::left(event.entity);
+        }
+    }
+
+    fn item_expire(
+        &self,
+        host: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::ItemExpireEvent<'_>,
+    ) {
+        items::expired(host, event.entity, event.stack);
+    }
+
+    fn server_tick(
+        &self,
+        host: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::ServerTickEvent<'_>,
+    ) {
+        if matches!(event.phase, mod_api::ServerTickPhase::ServerTickEnd { .. }) {
+            items::tick(host);
+        }
+    }
+
+    fn hopper_pickup_item(
+        &self,
+        _level: &dyn mod_api::LevelHost,
+        event: &mut mod_api::HopperPickupItemEvent<'_>,
+    ) -> Flow {
+        // A window item in a hopper would look destroyed: hoppers leave them be.
+        if event.item == items::WINDOW_ITEM {
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
+    }
+
+    fn right_click_item(
+        &self,
+        host: mod_api::HostSide,
+        event: &mut mod_api::RightClickItemEvent<'_>,
+    ) -> Flow {
+        let Some((key, app_id)) = items::key_of(event.click.stack) else {
+            return Flow::Continue;
+        };
+        match host {
+            // The client brings the window back...
+            mod_api::HostSide::Client(_) => this().use_window_item(key, &app_id),
+            // ...and the server uses the item up.
+            mod_api::HostSide::Server(host) => {
+                if let Some(player) = host.player(event.click.player) {
+                    let slot = match event.click.hand {
+                        mod_api::Hand::Off => Some(40),
+                        _ => player.selected_slot(&*host).map(|s| s as u32),
+                    };
+                    if let Some(slot) = slot {
+                        let _ = player.set_inventory_slot(host, slot, None);
+                    }
+                }
+            }
+        }
+        *event.cancellation_result = mod_api::InteractionResult::Success;
+        Flow::Cancel
     }
 
     fn render_frame_post(&self, host: &mut dyn ClientHost, _event: &mut RenderFramePostEvent) {

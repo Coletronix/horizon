@@ -21,7 +21,7 @@ static BUILT: &[mod_api::__private::native::BuiltMod] = &[
     mod_api::__private::native::BuiltMod {
         id: "wm_world",
         version: "0.1.0",
-        side: mod_api::Side::Client,
+        side: mod_api::Side::Both,
     },
 ];
 

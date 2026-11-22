@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Desktop windows stand in the world as things: look at one to point, click it to type, carry it, resize it, put it away."
 authors = []
 api = "0.2"
-side = "client"
+side = "both"
 capabilities = ["registries"]
 
 [dependencies]

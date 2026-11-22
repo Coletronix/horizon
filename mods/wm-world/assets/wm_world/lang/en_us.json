@@ -8,5 +8,6 @@
   "wm_world.hud.pocket": "%s put away · press R to bring one back",
   "wm_world.setting.hints": "Hints on the HUD",
   "wm_world.setting.hints.tooltip": "What looking at, carrying or typing into a window does, at the top of the screen",
-  "key.wm_world.release": "Leave the window you're typing into"
+  "key.wm_world.release": "Leave the window you're typing into",
+  "item.wm_world.window": "Window"
 }
