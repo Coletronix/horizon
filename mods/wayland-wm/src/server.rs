@@ -15,9 +15,9 @@ use smithay::{
         Buffer, Format, Fourcc, Modifier,
         dmabuf::{Dmabuf, WeakDmabuf},
     },
-    delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
-    desktop::{PopupKind, PopupManager, WindowSurfaceType},
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat,
+    delegate_shm, delegate_xdg_shell,
+    desktop::{PopupKind, PopupManager},
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::{FilterResult, KeyboardHandle, XkbConfig},
@@ -52,6 +52,12 @@ use smithay::{
             get_dmabuf,
         },
         output::{OutputHandler, OutputManagerState},
+        selection::{
+            SelectionHandler,
+            data_device::{
+                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+            },
+        },
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
             XdgToplevelSurfaceData,
@@ -116,6 +122,9 @@ pub(crate) fn start() -> Result<(String, Commands), String> {
 struct Toplevel {
     id: WindowId,
     window: smithay::desktop::Window,
+    /// Its mapped surfaces as last published, topmost last, in the window's space: what the
+    /// pointer can be over.
+    hits: Vec<(WlSurface, Rectangle<i32, Logical>)>,
 }
 
 pub(crate) struct State {
@@ -132,6 +141,7 @@ pub(crate) struct State {
     popups: PopupManager,
     toplevels: Vec<Toplevel>,
     next_id: u64,
+    data_device: DataDeviceState,
     dmabuf: DmabufState,
     _dmabuf_global: Option<DmabufGlobal>,
     /// Each live client dmabuf's id for the renderer's import cache: stable while it lives.
@@ -143,6 +153,8 @@ pub(crate) struct State {
     pointer_window: Option<(WindowId, Point<f64, Logical>)>,
     /// Something a snapshot shows changed since the last one.
     dirty: bool,
+    /// Each window's shape when last logged, so the log has one line per change.
+    logged: Mutex<Vec<(WindowId, [i32; 2], usize)>>,
     start: Instant,
     _signal: LoopSignal,
 }
@@ -213,6 +225,7 @@ fn run(
 
     // GPU clients' buffers, in the layouts the game's GPU imports. Without them (no Vulkan
     // import), clients fall back to wl_shm.
+    let data_device = DataDeviceState::new::<State>(&dh);
     let mut dmabuf = DmabufState::new();
     let dmabuf_global = horizon_live_texture_caps().and_then(|caps| {
         let formats: Vec<Format> = caps
@@ -286,6 +299,7 @@ fn run(
         popups: PopupManager::default(),
         toplevels: Vec::new(),
         next_id: 1,
+        data_device,
         dmabuf,
         _dmabuf_global: dmabuf_global,
         dmabuf_ids: Vec::new(),
@@ -294,6 +308,7 @@ fn run(
         focused: None,
         pointer_window: None,
         dirty: false,
+        logged: Mutex::new(Vec::new()),
         start: Instant::now(),
         _signal: event_loop.get_signal(),
     };
@@ -345,13 +360,14 @@ impl State {
                 let Some(toplevel) = self.toplevel(window) else {
                     return;
                 };
-                // The window's space starts at its geometry; the surfaces' at the root surface.
-                let geometry = toplevel.window.geometry();
-                let location = Point::<f64, Logical>::from((at[0], at[1])) + geometry.loc.to_f64();
+                // The topmost surface under the pointer; both in the window's space.
+                let location = Point::<f64, Logical>::from((at[0], at[1]));
                 let focus = toplevel
-                    .window
-                    .surface_under(location, WindowSurfaceType::ALL)
-                    .map(|(surface, origin)| (surface, origin.to_f64()));
+                    .hits
+                    .iter()
+                    .rev()
+                    .find(|(_, rect)| rect.to_f64().contains(location))
+                    .map(|(surface, rect)| (surface.clone(), rect.loc.to_f64()));
                 self.pointer_window = Some((window, location));
                 let pointer = self.pointer.clone();
                 pointer.motion(
@@ -579,7 +595,11 @@ impl State {
                         }
                     }
                     BufferAssignment::NewBuffer(buffer) => {
-                        if let Some([width, height]) = import(&buffer, &texture.texture, &damage, scale)
+                        let imported = import(&buffer, &texture.texture, &damage, scale);
+                        if imported.is_none() {
+                            log::warn!("wayland_wm: a buffer couldn't be read (not wl_shm, or a format it doesn't copy)");
+                        }
+                        if let Some([width, height]) = imported
                         {
                             let size = [width as i32 / scale, height as i32 / scale];
                             changed |= !texture.mapped || texture.size != size;
@@ -596,14 +616,13 @@ impl State {
     }
 
     /// The windows as presenters see them.
-    fn publish(&self) {
+    fn publish(&mut self) {
         let Some(wm) = crate::wm() else { return };
-        let windows = self
+        let windows: Vec<Window> = self
             .toplevels
-            .iter()
+            .iter_mut()
             .map(|toplevel| {
-                let surface = toplevel.window.toplevel().expect("wayland window");
-                let geometry = toplevel.window.geometry();
+                let surface = toplevel.window.toplevel().expect("wayland window").clone();
                 let (title, app_id) = with_states(surface.wl_surface(), |states| {
                     let data = states
                         .data_map
@@ -617,14 +636,37 @@ impl State {
                     })
                     .unwrap_or_default()
                 });
+                // The window's own surfaces in the root surface's space first: its visible area
+                // is what xdg geometry says, else all of them.
                 let mut layers = Vec::new();
-                let origin = Point::<i32, Logical>::from((-geometry.loc.x, -geometry.loc.y));
-                collect_layers(surface.wl_surface(), origin, false, &mut layers);
+                let mut hits = Vec::new();
+                collect_layers(surface.wl_surface(), (0, 0).into(), false, &mut layers, &mut hits);
+                let geometry = with_states(surface.wl_surface(), |states| {
+                    states
+                        .cached_state
+                        .get::<smithay::wayland::shell::xdg::SurfaceCachedState>()
+                        .current()
+                        .geometry
+                })
+                .unwrap_or_else(|| {
+                    hits.iter()
+                        .map(|(_, rect)| *rect)
+                        .reduce(|a: Rectangle<i32, Logical>, b| a.merge(b))
+                        .unwrap_or_default()
+                });
+                // Then the window's space: its geometry's corner is (0, 0).
+                for layer in &mut layers {
+                    layer.at = [layer.at[0] - geometry.loc.x, layer.at[1] - geometry.loc.y];
+                }
+                for (_, rect) in &mut hits {
+                    rect.loc -= geometry.loc;
+                }
                 for (popup, at) in PopupManager::popups_for_surface(surface.wl_surface()) {
                     // Popup offsets are from the window's geometry already.
                     let at = at - popup.geometry().loc;
-                    collect_layers(popup.wl_surface(), at, true, &mut layers);
+                    collect_layers(popup.wl_surface(), at, true, &mut layers, &mut hits);
                 }
+                toplevel.hits = hits;
                 Window {
                     id: toplevel.id,
                     title,
@@ -635,12 +677,38 @@ impl State {
                 }
             })
             .collect();
+        let shapes: Vec<_> = windows
+            .iter()
+            .map(|w: &Window| (w.id, w.size, w.layers.len()))
+            .collect();
+        let mut logged = self.logged.lock().unwrap_or_else(|p| p.into_inner());
+        for (window, shape) in windows.iter().zip(&shapes) {
+            if !logged.contains(shape) {
+                log::info!(
+                    "wayland_wm: window {} {:?} is {}x{} with {} layers",
+                    window.id.0,
+                    window.title,
+                    window.size[0],
+                    window.size[1],
+                    window.layers.len()
+                );
+            }
+        }
+        *logged = shapes;
+        drop(logged);
         wm.publish(windows);
     }
 }
 
-/// The mapped surfaces of `surface`'s tree (subsurfaces at their places), with `surface` at `at`.
-fn collect_layers(surface: &WlSurface, at: Point<i32, Logical>, popup: bool, layers: &mut Vec<Layer>) {
+/// The mapped surfaces of `surface`'s tree (subsurfaces at their places), with `surface` at `at`,
+/// and where each lies for hit testing.
+fn collect_layers(
+    surface: &WlSurface,
+    at: Point<i32, Logical>,
+    popup: bool,
+    layers: &mut Vec<Layer>,
+    hits: &mut Vec<(WlSurface, Rectangle<i32, Logical>)>,
+) {
     with_surface_tree_downward(
         surface,
         at,
@@ -656,7 +724,7 @@ fn collect_layers(surface: &WlSurface, at: Point<i32, Logical>, popup: bool, lay
             }
             TraversalAction::DoChildren(at)
         },
-        |_, states, at| {
+        |surface, states, at| {
             let mut at = *at;
             if states.role == Some("subsurface") {
                 at += states
@@ -668,6 +736,10 @@ fn collect_layers(surface: &WlSurface, at: Point<i32, Logical>, popup: bool, lay
             if let Some(texture) = states.data_map.get::<Mutex<SurfaceTexture>>() {
                 let texture = texture.lock().unwrap_or_else(|p| p.into_inner());
                 if texture.mapped {
+                    hits.push((
+                        surface.clone(),
+                        Rectangle::new(at, (texture.size[0], texture.size[1]).into()),
+                    ));
                     layers.push(Layer {
                         texture: texture.texture.clone(),
                         at: [at.x, at.y],
@@ -887,9 +959,11 @@ impl XdgShellHandler for State {
         });
         let id = WindowId(self.next_id);
         self.next_id += 1;
+        log::info!("wayland_wm: window {} opened", id.0);
         self.toplevels.push(Toplevel {
             id,
             window: smithay::desktop::Window::new_wayland_window(surface),
+            hits: Vec::new(),
         });
         self.dirty = true;
     }
@@ -958,6 +1032,22 @@ impl SeatHandler for State {
 
 impl OutputHandler for State {}
 
+// Clipboard and drag and drop between the compositor's own programs (GTK requires the global).
+// The player's desktop clipboard isn't bridged yet.
+impl SelectionHandler for State {
+    type SelectionUserData = ();
+}
+
+impl DataDeviceHandler for State {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device
+    }
+}
+
+impl ClientDndGrabHandler for State {}
+
+impl ServerDndGrabHandler for State {}
+
 impl DmabufHandler for State {
     fn dmabuf_state(&mut self) -> &mut DmabufState {
         &mut self.dmabuf
@@ -976,6 +1066,7 @@ delegate_xdg_shell!(State);
 delegate_seat!(State);
 delegate_output!(State);
 delegate_dmabuf!(State);
+delegate_data_device!(State);
 
 fn horizon_live_texture_caps() -> Option<mod_api::LiveDmabufCaps> {
     mod_api::live_dmabuf_caps()

@@ -34,17 +34,30 @@ fn main() {
     );
 }
 
-/// Put the mod's package (its manifest) where the game looks for the native mods it was built
-/// with, beside this executable, as the launcher installs it.
+/// The mod's package as the launcher exports it beside the game: its manifest and its source.
+const PACKAGE: &[(&str, &str)] = &[
+    ("horizon-mod.toml", include_str!("../../horizon-mod.toml")),
+    ("Cargo.toml", include_str!("../../Cargo.toml")),
+    ("src/lib.rs", include_str!("../../src/lib.rs")),
+    ("src/server.rs", include_str!("../../src/server.rs")),
+    ("src/overlay.rs", include_str!("../../src/overlay.rs")),
+    ("src/panels.rs", include_str!("../../src/panels.rs")),
+];
+
+/// Put the mod's package where the game looks for the native mods it was built with, beside this
+/// executable, as the launcher installs it.
 fn install_package() {
-    let manifest = include_str!("../../horizon-mod.toml");
     let installed = std::env::current_exe().map(|exe| {
         exe.with_file_name(horizon_mod_package::mod_list::NATIVE_DIR)
             .join("wayland_wm")
     });
     let result = installed.and_then(|dir| {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("horizon-mod.toml"), manifest)
+        for (path, text) in PACKAGE {
+            let to = dir.join(path);
+            std::fs::create_dir_all(to.parent().expect("a file in the package"))?;
+            std::fs::write(to, text)?;
+        }
+        Ok(())
     });
     if let Err(error) = result {
         eprintln!("wayland-wm-dev: the mod's package couldn't be installed: {error}");

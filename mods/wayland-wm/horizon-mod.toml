@@ -6,7 +6,8 @@ authors = []
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins.
 api = "0.2"
 side = "client"
-capabilities = []
+# The content API every mod declares (registries: "May add blocks, items, mob effects and entity types").
+capabilities = ["registries"]
 
 # Pinned to the Nightly this branch starts from; the engine changes it needs (live textures,
 # dmabuf import) aren't in a published build yet, so build it with wayland-wm-dev in this checkout.
