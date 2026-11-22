@@ -62,6 +62,14 @@ pub enum Message {
     },
     /// Server to client: this window's item was destroyed; close the window.
     Close { key: WindowKey },
+    /// Server to client: a dispenser fired an app item: start the program, its window at
+    /// `at`, seen straight on from the view `yaw`, `pitch`.
+    Launch {
+        exec: String,
+        at: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    },
 }
 
 impl Message {
@@ -278,6 +286,51 @@ pub fn tick(host: &mut dyn ServerHost) {
     }
 }
 
+/// A dispenser fired an app item: the nearest player within 64 blocks starts the program,
+/// its window in front of the dispenser.
+pub fn dispensed(
+    host: &mut dyn ServerHost,
+    dimension: &str,
+    pos: [i32; 3],
+    facing: mod_api::Direction,
+    exec: String,
+) {
+    let centre = [
+        f64::from(pos[0]) + 0.5,
+        f64::from(pos[1]) + 0.5,
+        f64::from(pos[2]) + 0.5,
+    ];
+    let nearest = host
+        .players()
+        .server_players()
+        .into_iter()
+        .filter(|p| {
+            p.dimension(&*host)
+                .is_some_and(|d| d.to_string() == dimension)
+        })
+        .filter_map(|p| {
+            let at = p.entity().position(&*host)?;
+            let d = (0..3).map(|i| (at[i] - centre[i]).powi(2)).sum::<f64>();
+            (d <= 64.0 * 64.0).then_some((d, p))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    let Some((_, player)) = nearest else {
+        return;
+    };
+    let (at, yaw, pitch) = crate::apps::in_front_of(pos, facing);
+    let _ = player.send_payload(
+        host,
+        &channel(),
+        Message::Launch {
+            exec,
+            at,
+            yaw,
+            pitch,
+        }
+        .bytes(),
+    );
+}
+
 /// Tell the window's owner to close it.
 fn close(host: &mut dyn ServerHost, key: WindowKey, owner: Option<u128>) {
     let Some(player) = owner.and_then(|o| host.player(o)) else {
@@ -305,7 +358,7 @@ impl IPayloadHandler for ServerHandler {
         let host = context
             .server_host()
             .map_err(|e| PayloadHandleError::Failed(format!("{e:?}")))?;
-        let owner = player.profile(&*host).map_or(0, |p| p.uuid);
+        let owner = player.uuid();
         if let Some(stack) = window_stack(key, &title, &app_id, owner)
             && let Err(error) = player.give_stack(host, stack)
         {
@@ -317,8 +370,13 @@ impl IPayloadHandler for ServerHandler {
 
 // --- Client side ---
 
-/// Closes the client asks for, from the payload thread to the game's.
+/// Closes the server asks for, from the payload thread to the game's.
 pub static CLOSES: Mutex<Vec<WindowKey>> = Mutex::new(Vec::new());
+/// A program a dispenser started: the command, the window's centre, and the view (yaw, pitch)
+/// that sees it straight on.
+pub type Launch = (String, [f64; 3], f32, f32);
+/// Programs dispensers started, from the payload thread to the game's.
+pub static LAUNCHES: Mutex<Vec<Launch>> = Mutex::new(Vec::new());
 
 /// The client's end of the channel: a window item was destroyed.
 pub struct ClientHandler;
@@ -329,8 +387,18 @@ impl IPayloadHandler for ClientHandler {
         payload: PayloadBytes,
         _context: &mut dyn IPayloadContext,
     ) -> Result<(), PayloadHandleError> {
-        if let Message::Close { key } = Message::parse(&payload)? {
-            CLOSES.lock().unwrap_or_else(|p| p.into_inner()).push(key);
+        match Message::parse(&payload)? {
+            Message::Close { key } => CLOSES.lock().unwrap_or_else(|p| p.into_inner()).push(key),
+            Message::Launch {
+                exec,
+                at,
+                yaw,
+                pitch,
+            } => LAUNCHES
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push((exec, at, yaw, pitch)),
+            Message::PickedUp { .. } => {}
         }
         Ok(())
     }

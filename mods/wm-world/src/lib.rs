@@ -19,6 +19,7 @@
 //! Where windows stand is kept while the session lasts, across the game's restarts.
 #![deny(unsafe_code)]
 
+mod apps;
 mod draw;
 mod items;
 mod space;
@@ -131,6 +132,9 @@ struct State {
     mining: Option<(WindowId, Instant)>,
     /// Put-away windows, the most recent last.
     pocket: Vec<WindowId>,
+    /// Where the next window to open goes (a dispenser started its program), and since when:
+    /// it lapses after a while.
+    place_next: Option<(Pose, Instant)>,
     /// Windows just picked up, whose item is to be asked of the server.
     pick_up: Vec<WindowId>,
     /// Put-away windows whose item the server gave: the item brings them back, not the recall
@@ -280,6 +284,9 @@ impl WmWorld {
                         pose.yaw,
                         pose.pitch
                     );
+                    if window.parent.is_none() {
+                        state.place_next = None;
+                    }
                     state.placed.push(Placed {
                         window: window.id,
                         pose,
@@ -304,6 +311,12 @@ impl WmWorld {
     /// beside any window already there.
     fn place_new(&self, state: &State, window: &Window) -> Pose {
         let pixel = 1.0 / space::PIXELS_PER_BLOCK;
+        if window.parent.is_none()
+            && let Some((pose, since)) = state.place_next
+            && since.elapsed().as_secs() < 20
+        {
+            return pose;
+        }
         if let Some(parent) = window.parent.and_then(|p| state.placed(p)) {
             let b = parent.pose.basis();
             return Pose {
@@ -698,6 +711,20 @@ impl WmWorld {
                 Err(error) => log::info!("wm_world: no window item ({error:?}): put away only"),
             }
         }
+        let launches =
+            std::mem::take(&mut *items::LAUNCHES.lock().unwrap_or_else(|p| p.into_inner()));
+        for (exec, at, yaw, pitch) in launches {
+            log::info!("wm_world: a dispenser starts `{exec}`");
+            wm.spawn(&exec);
+            state.place_next = Some((
+                Pose {
+                    centre: at,
+                    yaw,
+                    pitch,
+                },
+                Instant::now(),
+            ));
+        }
         let closes = std::mem::take(&mut *items::CLOSES.lock().unwrap_or_else(|p| p.into_inner()));
         for key in closes {
             if let Some(window) = items::local_window(key, state.instance) {
@@ -942,6 +969,23 @@ fn this() -> &'static WmWorld {
     MOD.get_or_init(|| Box::leak(Box::default()))
 }
 
+/// App items in a dispenser start their program, the window in front of the dispenser.
+struct Dispensable;
+
+#[mod_api::horizon_part]
+impl mod_api::ItemPart for Dispensable {
+    fn dispense_item(
+        &self,
+        host: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::DispenseItemEvent<'_>,
+    ) -> Option<mod_api::Dispensed> {
+        let exec = apps::exec_of(event.stack)?;
+        items::dispensed(host, event.dimension, event.pos, event.facing, exec);
+        // The item stays; the dispenser clicks.
+        Some((Some(event.stack.clone()), 1000))
+    }
+}
+
 /// The hooks, forwarding to [`this`].
 #[derive(Default)]
 pub struct Hooked;
@@ -952,6 +996,9 @@ impl Hooks for Hooked {
         // Optional: a server without this mod still lets the player in (windows are put away
         // instead of becoming items).
         items::set_key(r.item_key(items::WINDOW_ITEM));
+        let app = r.item_key(apps::APP_ITEM);
+        apps::set_key(app);
+        r.item_part(app, Dispensable);
         let (server, client) = items::handlers();
         r.payload_handlers()
             .registrar("1")
@@ -976,6 +1023,7 @@ impl Hooks for Hooked {
 
     fn items(&self, _context: &RegistrationContext, event: &mut mod_api::ItemsEvent<'_>) {
         items::declare(event.items);
+        apps::declare(event.items);
     }
 
     fn entity_join_level(
@@ -1033,6 +1081,17 @@ impl Hooks for Hooked {
         host: mod_api::HostSide,
         event: &mut mod_api::RightClickItemEvent<'_>,
     ) -> Flow {
+        if let Some(exec) = apps::exec_of(event.click.stack) {
+            // An app item starts its program on the client; it isn't used up.
+            if let mod_api::HostSide::Client(_) = host
+                && let Some(wm) = wayland_wm::wm()
+            {
+                log::info!("wm_world: starting `{exec}`");
+                wm.spawn(&exec);
+            }
+            *event.cancellation_result = mod_api::InteractionResult::Success;
+            return Flow::Cancel;
+        }
         let Some((key, app_id)) = items::key_of(event.click.stack) else {
             return Flow::Continue;
         };
@@ -1054,6 +1113,18 @@ impl Hooks for Hooked {
         }
         *event.cancellation_result = mod_api::InteractionResult::Success;
         Flow::Cancel
+    }
+
+    fn build_creative_mode_tab_contents(
+        &self,
+        _host: &mut dyn ClientHost,
+        event: &mut mod_api::BuildCreativeModeTabContentsEvent<'_>,
+    ) {
+        if event.tab == "minecraft:tools_and_utilities" {
+            event
+                .items
+                .extend(apps::installed().iter().filter_map(apps::stack));
+        }
     }
 
     fn render_frame_post(&self, host: &mut dyn ClientHost, _event: &mut RenderFramePostEvent) {
