@@ -87,6 +87,15 @@ pub trait DrawContext {
     fn gui_nine_slice(&mut self, sprite: &str, rect: [f32; 4], color: u32) {
         unimplemented!("DrawContext::gui_nine_slice")
     }
+    /// Part `uv` (`[u0, v0, u1, v1]`, 0 to 1 across the texture) of live texture `texture`
+    /// stretched into `rect` (`[x, y, w, h]` in GUI pixels), every texel multiplied by `tint`
+    /// (ARGB, `0xFFFFFFFF` draws it as it is). The texture is uploaded as it changes, only the
+    /// regions its writer damaged; a texture no frame draws is freed on the GPU. Follows the clip
+    /// ([`push_clip`](Self::push_clip)).
+    /// Not on wasm: the texture is a process-local handle the renderer shares with its writer.
+    fn live_texture(&mut self, texture: &LiveTexture, rect: [f32; 4], uv: [f32; 4], tint: u32) {
+        let _ = (texture, rect, uv, tint);
+    }
     /// A vanilla tooltip at the cursor, in GUI pixels.
     /// Refuses text deeper than 512 component nodes before applying any changes.
     fn gui_tooltip(&mut self, lines: &[Text], at: [f32; 2]) -> Result<(), TextFormError> {

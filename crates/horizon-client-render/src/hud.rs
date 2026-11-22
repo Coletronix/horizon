@@ -23,6 +23,7 @@ mod menu_pictures;
 mod model_reducing;
 mod pack_text;
 pub mod pictures;
+mod live;
 pub(crate) mod sprite_modifiers;
 
 /// A sprite's atlas region, and its size in GUI pixels: the size of the
@@ -1780,6 +1781,8 @@ pub struct GuiScale {
 /// One frame of overlay geometry in GUI pixels.
 pub struct HudBatch {
     pub pictures: Vec<Arc<pictures::Picture>>,
+    /// The live textures (`Blend::Live`) this frame draws.
+    pub live: Vec<horizon_live_texture::LiveTexture>,
     pub vertices: Vec<HudVertex>,
     pub scale: f32,
     pub width: f32,
@@ -1806,6 +1809,8 @@ pub struct HudBatch {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Blend {
     Picture(u64),
+    /// A live texture's run, by its id (`HudBatch::live_texture`).
+    Live(u64),
     /// `BlendFunction.TRANSLUCENT`.
     Alpha,
     /// `BlendFunction.INVERT` (`RenderPipelines.CROSSHAIR`, `GUI_INVERT`).
@@ -1853,6 +1858,7 @@ impl HudBatch {
     fn with_gui_size(gui: horizon_client_input::window::GuiSize) -> Self {
         Self {
             pictures: Vec::new(),
+            live: Vec::new(),
             vertices: Vec::new(),
             scale: gui.scale as f32,
             width: gui.size[0] as f32,
@@ -2657,6 +2663,7 @@ use crate::gfx::hud_coverage::{self, Pipeline};
 
 pub struct HudRenderer {
     pictures: HashMap<u64, (Arc<pictures::Picture>, wgpu::BindGroup)>,
+    live: HashMap<u64, live::LiveGpu>,
     pub sprite_animations: Vec<(Rect, crate::sprites::SpriteAnimation, (usize, usize, u32))>,
     /// The shared atlas texture, for run-time glyph uploads.
     pub atlas_texture: Option<wgpu::Texture>,
@@ -2946,6 +2953,7 @@ impl HudRenderer {
         });
         Ok(Self {
             pictures: HashMap::new(),
+            live: HashMap::new(),
             atlas_texture: None,
             sprite_animations: Vec::new(),
             pipeline,
@@ -3033,6 +3041,7 @@ impl HudRenderer {
         size: [u32; 2],
     ) {
         self.prepare_pictures(device, uploads, encoder, batch);
+        self.prepare_live(device, uploads, encoder, batch);
         self.upload_patches(uploads, encoder, &batch.patches);
         if batch.vertices.is_empty() || size.contains(&0) {
             return;
@@ -3175,6 +3184,10 @@ impl HudRenderer {
                 let pipeline = match blend {
                     Blend::Picture(id) => {
                         self.draw_picture(&mut pass, *id, range.clone(), coverage.is_some());
+                        continue;
+                    }
+                    Blend::Live(id) => {
+                        self.draw_live(&mut pass, *id, range.clone(), coverage.is_some());
                         continue;
                     }
                     Blend::Alpha => &self.pipeline,
@@ -5603,6 +5616,7 @@ texture=wide",
         for (width, height) in [(640, 360), (641, 361), (456, 256), (534, 300), (100, 100)] {
             let batch = HudBatch {
                 pictures: Vec::new(),
+                live: Vec::new(),
                 vertices: Vec::new(),
                 scale: 3.0,
                 width: width as f32,

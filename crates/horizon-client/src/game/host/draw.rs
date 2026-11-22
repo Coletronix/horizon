@@ -74,6 +74,14 @@ impl DrawContext for GameDrawContext<'_, '_> {
         self.game
             .native_gui_nine_slice(&mut *self.surface, sprite, rect, color)
     }
+    fn live_texture(&mut self, texture: &LiveTexture, rect: [f32; 4], uv: [f32; 4], tint: u32) {
+        if !rect.iter().chain(&uv).all(|v| v.is_finite()) {
+            return;
+        }
+        let [a, r, g, b] = tint.to_be_bytes();
+        self.surface
+            .live_texture(texture, rect, uv, crate::hud::rgba(r, g, b, a));
+    }
     fn gui_tooltip(
         &mut self,
         lines: &[Text],

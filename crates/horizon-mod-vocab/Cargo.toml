@@ -12,6 +12,7 @@ name = "mod_vocab"
 [dependencies]
 horizon-mod-runtime = { path = "../horizon-mod-runtime" }
 horizon-core = { path = "../horizon-core" }
+horizon-live-texture = { path = "../horizon-live-texture" }
 horizon-mod-api-macros = { path = "../horizon-mod-api-macros" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
