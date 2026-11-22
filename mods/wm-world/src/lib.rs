@@ -511,6 +511,19 @@ impl WmWorld {
             }) if playing && state.carry.is_none() && state.drag.is_none() => Some((window, at)),
             _ => None,
         };
+        // A button held down (dragging a selection, a file): off every screen, the pointer
+        // goes on along the plane of the window it is on, past its edges, as a drag past the
+        // edge of a desktop window does; onto another window's screen, it moves there, so a
+        // drag can drop into another window.
+        let dragging = !state.buttons.is_empty() && playing;
+        let on = on.or_else(|| {
+            let (window, _) = state.pointer.filter(|_| dragging)?;
+            let placed = state.placed(window).filter(|p| state.here(p))?;
+            let (eye, dir, ..) = state.eye?;
+            let [x, y] = space::on_front(&placed.pose, eye, dir)?;
+            let shape = placed.shape(&[]);
+            Some((window, shape.to_pixels(x, y)))
+        });
         match (on, state.pointer) {
             (Some((window, at)), last) => {
                 if last.is_none_or(|(w, a)| w != window || a != at) {
@@ -519,7 +532,7 @@ impl WmWorld {
                 }
             }
             (None, Some(_)) => {
-                // Off the screen: a held button lets go there, as the edge of a desktop would.
+                // Off the screen with nothing held, or the window gone: any held button lets go.
                 for button in std::mem::take(&mut state.buttons) {
                     wm.send(Input::PointerButton {
                         button,

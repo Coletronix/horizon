@@ -11,6 +11,7 @@ with the game's own controls.
 | Type | While the crosshair is on that window, every key is the window's, Escape included |
 | Stop typing | Look away (keys are the game's again; look back and they're the window's), or press the release key (Super, rebindable in Controls), or hold Escape for a second |
 | Scroll | The wheel over a screen scrolls it |
+| Drag | Hold a button and look: past a window's edge the drag goes on along its plane; onto another window, it carries what you drag there (drag and drop between windows) |
 | Carry | Right-click the bezel, back or a side; the wheel brings it nearer or pushes it away; right-click sets it down |
 | Line up | Set a carried window down beside another: it snaps against its side, tops level, turned a little towards you so a row curves around you ("Curved rows" turns that off) |
 | Herd | Right-click a window's bezel holding a lead: it follows you (any number of them, pushing each other apart as they go). Right-click a block with the lead to tie them there; right-click a window with the lead again to let it go |
