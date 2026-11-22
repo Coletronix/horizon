@@ -1030,6 +1030,11 @@ impl WmWorld {
             return Flow::Cancel;
         }
         let Some(gaze) = state.gaze else {
+            // A click into the world (mining, using, attacking): the window lets go of the
+            // keyboard, as clicking another window on a desktop would.
+            if state.focus.is_some() {
+                self.release_focus(&mut state, wm);
+            }
             return Flow::Continue;
         };
         match gaze.part {
@@ -1050,7 +1055,12 @@ impl WmWorld {
                 state.buttons.insert(button);
                 Flow::Cancel
             }
-            _ if gaze.distance > HAND_REACH => Flow::Continue,
+            _ if gaze.distance > HAND_REACH => {
+                if state.focus.is_some() {
+                    self.release_focus(&mut state, wm);
+                }
+                Flow::Continue
+            }
             part => {
                 let Some(placed) = state.placed(gaze.window).cloned() else {
                     return Flow::Continue;

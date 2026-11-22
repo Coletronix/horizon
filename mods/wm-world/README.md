@@ -9,7 +9,7 @@ with the game's own controls.
 | Point | Look at a screen: the pointer is where the crosshair is |
 | Click | Click a screen: the window gets the keyboard, and the click reaches it |
 | Type | While the crosshair is on that window, every key is the window's, Escape included |
-| Stop typing | Look away (keys are the game's again; look back and they're the window's), or press the release key (Super, rebindable in Controls), or hold Escape for a second |
+| Stop typing | Look away (keys are the game's again; look back and they're the window's), or press the release key (Super, rebindable in Controls), or hold Escape for a second, or click into the world (mine, use, attack) |
 | Scroll | The wheel over a screen scrolls it |
 | Drag | Hold a button and look: past a window's edge the drag goes on along its plane; onto another window, it carries what you drag there (drag and drop between windows) |
 | Carry | Right-click the bezel, back or a side; the wheel brings it nearer or pushes it away; right-click sets it down |
