@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Horizon
+Comment=Minecraft as the desktop: programs' windows stand in the world
+# Copy to /usr/share/wayland-sessions/ and point Exec at a script that runs, for example:
+#   horizon-session --display drm -- /path/to/wayland-wm-dev --resources /path/to/resources --world Desktop
+Exec=horizon-session-start
+Type=Application
+DesktopNames=Horizon

@@ -416,8 +416,10 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
         clipboard_in,
         held_spawns: options.spawn.clone(),
     };
-    if let Some(crate::Screen::Window) = options.display {
-        display::start_window(&mut state, &mut event_loop)?;
+    match options.display {
+        Some(crate::Screen::Window) => display::start_window(&mut state, &mut event_loop)?,
+        Some(crate::Screen::Drm) => display::start_drm(&mut state, &mut event_loop)?,
+        None => {}
     }
     // With a screen, the game is a program of the session too.
     let game_env: Vec<(String, String)> = match options.display {

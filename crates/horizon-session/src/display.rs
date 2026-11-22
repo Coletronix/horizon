@@ -11,16 +11,23 @@
 //! Input: the game has a seat of its own (`horizon-game`), so its keyboard focus never fights
 //! the programs' (`horizon`), which the game drives through the control socket.
 use super::*;
+use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
+use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface};
+use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, InputBackend, InputEvent, KeyState,
     KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
+use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
+use smithay::backend::renderer::Bind;
 use smithay::backend::renderer::{
     Color32F, Frame, ImportDma, ImportMem, Renderer,
     gles::{GlesRenderer, GlesTexture},
 };
+use smithay::backend::session::{Event as SessionEvent, Session, libseat::LibSeatSession};
 use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
 use smithay::input::pointer::RelativeMotionEvent;
+use smithay::reexports::drm::control::{Device as ControlDevice, ModeTypeFlags, connector};
 use smithay::utils::{Physical, Size};
 use std::collections::BTreeSet;
 
@@ -40,6 +47,20 @@ const KEY_RIGHTALT: u32 = 100;
 
 pub enum Backend {
     Window(Box<WinitGraphicsBackend<GlesRenderer>>),
+    Drm(Box<DrmScreen>),
+}
+
+/// The computer's screen, driven directly: the first connected display, at its preferred mode.
+pub struct DrmScreen {
+    session: LibSeatSession,
+    drm: DrmDevice,
+    renderer: GlesRenderer,
+    surface: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, ()>,
+    libinput: smithay::reexports::input::Libinput,
+    /// A frame is queued, waiting for its vblank.
+    pending: bool,
+    /// The session has the console: another console has it while switched away.
+    active: bool,
 }
 
 pub struct Screen {
@@ -109,6 +130,72 @@ pub fn start_window(state: &mut State, event_loop: &mut EventLoop<State>) -> Res
     Ok(())
 }
 
+/// What one frame shows: surfaces' textures where they go, solid rectangles under them, and the
+/// fallback desktop's pointer.
+struct Picture<'a> {
+    size: Size<i32, Physical>,
+    layers: &'a [(SurfaceId, Rectangle<f64, Logical>)],
+    solids: &'a [(Rectangle<i32, Physical>, Color32F)],
+    pointer: Option<Point<f64, Logical>>,
+}
+
+/// Draw `picture` into `framebuffer`.
+fn paint(
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut smithay::backend::renderer::gles::GlesTarget<'_>,
+    transform: Transform,
+    picture: &Picture<'_>,
+    textures: &HashMap<SurfaceId, (u64, GlesTexture)>,
+) -> Result<(), String> {
+    let size = picture.size;
+    let full = Rectangle::from_size(size);
+    let mut frame = renderer
+        .render(framebuffer, size, transform)
+        .map_err(|e| e.to_string())?;
+    frame
+        .clear(BACKGROUND, &[full])
+        .map_err(|e| e.to_string())?;
+    for (rect, colour) in picture.solids {
+        frame
+            .draw_solid(*rect, &[full], *colour)
+            .map_err(|e| e.to_string())?;
+    }
+    for (id, dst) in picture.layers {
+        let Some((_, texture)) = textures.get(id) else {
+            continue;
+        };
+        let tex_size = smithay::backend::renderer::Texture::size(texture);
+        let src = Rectangle::from_size((f64::from(tex_size.w), f64::from(tex_size.h)).into());
+        let dst = Rectangle::new(
+            (dst.loc.x as i32, dst.loc.y as i32).into(),
+            (dst.size.w.round() as i32, dst.size.h.round() as i32).into(),
+        );
+        Frame::render_texture_from_to(
+            &mut frame,
+            texture,
+            src,
+            dst,
+            &[full],
+            &[],
+            Transform::Normal,
+            1.0,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if let Some(p) = picture.pointer {
+        // A plain pointer: the programs' own cursors come later.
+        frame
+            .draw_solid(
+                Rectangle::new((p.x as i32, p.y as i32).into(), (6, 6).into()),
+                &[full],
+                CURSOR,
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    let _ = frame.finish().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// For tests and bug reports: with `HORIZON_SESSION_SHOTS=DIR`, a file `DIR/shot.request` asks
 /// for the next frame as `DIR/shot.png` (the request is taken away once it is written).
 fn shoot(
@@ -165,6 +252,137 @@ fn renderer_caps(renderer: &GlesRenderer) -> Option<DmabufCaps> {
         device: node.dev_id(),
         formats,
     })
+}
+
+/// Take the computer's screen from a text console: the seat (libseat), the first GPU and its
+/// first connected display, and the keyboards and mice (libinput).
+pub fn start_drm(state: &mut State, event_loop: &mut EventLoop<State>) -> Result<(), String> {
+    use smithay::reexports::rustix::fs::OFlags;
+    let (mut session, notifier) = LibSeatSession::new()
+        .map_err(|e| format!("no seat to run on (from a text console?): {e}"))?;
+    let seat = session.seat();
+    let gpu = smithay::backend::udev::primary_gpu(&seat)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            smithay::backend::udev::all_gpus(&seat)
+                .ok()?
+                .into_iter()
+                .next()
+        })
+        .ok_or("no GPU")?;
+    let fd = session
+        .open(
+            &gpu,
+            OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
+        )
+        .map_err(|e| format!("{}: {e}", gpu.display()))?;
+    let fd = DrmDeviceFd::new(smithay::utils::DeviceFd::from(fd));
+    let (mut drm, drm_events) = DrmDevice::new(fd.clone(), true).map_err(|e| e.to_string())?;
+    let gbm = GbmDevice::new(fd.clone()).map_err(|e| e.to_string())?;
+    // Safety: the EGL display and context live as long as the renderer that owns them.
+    let egl = unsafe { EGLDisplay::new(gbm.clone()) }.map_err(|e| e.to_string())?;
+    let context = EGLContext::new(&egl).map_err(|e| e.to_string())?;
+    let renderer = unsafe { GlesRenderer::new(context) }.map_err(|e| e.to_string())?;
+
+    // The first connected display, its preferred mode, and a CRTC that can drive it.
+    let resources = drm.resource_handles().map_err(|e| e.to_string())?;
+    let connector = resources
+        .connectors()
+        .iter()
+        .filter_map(|c| drm.get_connector(*c, false).ok())
+        .find(|c| c.state() == connector::State::Connected && !c.modes().is_empty())
+        .ok_or("no connected display")?;
+    let mode = connector
+        .modes()
+        .iter()
+        .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+        .copied()
+        .unwrap_or(connector.modes()[0]);
+    let crtc = connector
+        .encoders()
+        .iter()
+        .filter_map(|e| drm.get_encoder(*e).ok())
+        .flat_map(|e| resources.filter_crtcs(e.possible_crtcs()))
+        .next()
+        .ok_or("no CRTC for the display")?;
+    let surface = drm
+        .create_surface(crtc, mode, &[connector.handle()])
+        .map_err(|e| e.to_string())?;
+    let allocator = GbmAllocator::new(gbm, GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
+    let formats = renderer.egl_context().dmabuf_render_formats().clone();
+    let surface = GbmBufferedSurface::new(
+        surface,
+        allocator,
+        &[Fourcc::Argb8888, Fourcc::Xrgb8888],
+        formats,
+    )
+    .map_err(|e| e.to_string())?;
+    let (w, h) = mode.size();
+    let size: Size<i32, Physical> = (i32::from(w), i32::from(h)).into();
+
+    // Keyboards and mice of this seat.
+    let mut libinput = smithay::reexports::input::Libinput::new_with_udev(
+        LibinputSessionInterface::from(session.clone()),
+    );
+    libinput
+        .udev_assign_seat(&seat)
+        .map_err(|()| "libinput couldn't take the seat's devices".to_string())?;
+    let handle = event_loop.handle();
+    handle
+        .insert_source(
+            LibinputInputBackend::new(libinput.clone()),
+            |event, _, state: &mut State| state.screen_input(event),
+        )
+        .map_err(|e| e.to_string())?;
+    handle
+        .insert_source(drm_events, |event, _, state: &mut State| match event {
+            DrmEvent::VBlank(_) => state.drm_vblank(),
+            DrmEvent::Error(error) => log::warn!("the display: {error}"),
+        })
+        .map_err(|e| e.to_string())?;
+    handle
+        .insert_source(notifier, |event, _, state: &mut State| {
+            state.drm_session(event)
+        })
+        .map_err(|e| e.to_string())?;
+
+    if let Some(caps) = renderer_caps(&renderer) {
+        state.offer_dmabufs(&caps);
+    }
+    let mut game_seat = state.seat_state.new_wl_seat(&state.display, "horizon-game");
+    let game_keyboard = game_seat
+        .add_keyboard(XkbConfig::default(), 400, 30)
+        .map_err(|e| format!("the game's keyboard: {e}"))?;
+    let game_pointer = game_seat.add_pointer();
+    state.screen = Some(Screen {
+        backend: Backend::Drm(Box::new(DrmScreen {
+            session,
+            drm,
+            renderer,
+            surface,
+            libinput,
+            pending: false,
+            active: true,
+        })),
+        size,
+        fallback: false,
+        held: BTreeSet::new(),
+        textures: HashMap::new(),
+        pointer: (f64::from(size.w) / 2.0, f64::from(size.h) / 2.0).into(),
+        tiles: Vec::new(),
+        game_keyboard,
+        game_pointer,
+        last_render: Instant::now(),
+    });
+    state.screen_resized(size);
+    log::info!(
+        "showing the game on {}: {}x{}",
+        gpu.display(),
+        size.w,
+        size.h
+    );
+    Ok(())
 }
 
 impl State {
@@ -353,70 +571,61 @@ impl State {
                 layers.push((layer.surface, Rectangle::new(at.into(), extent.into())));
             }
         }
-        // Textures for what is drawn.
-        let Backend::Window(backend) = &mut screen.backend;
-        {
-            let renderer = backend.renderer();
-            for (id, _) in &layers {
-                self.update_texture(renderer, &mut screen.textures, *id);
+        // Textures for what is drawn, then the frame, on whichever screen this is.
+        let picture = Picture {
+            size,
+            layers: &layers,
+            solids: &solids,
+            pointer: fallback.then_some(screen.pointer),
+        };
+        match &mut screen.backend {
+            Backend::Window(backend) => {
+                for (id, _) in &layers {
+                    self.update_texture(backend.renderer(), &mut screen.textures, *id);
+                }
+                screen
+                    .textures
+                    .retain(|id, _| layers.iter().any(|(l, _)| l == id));
+                let (renderer, mut framebuffer) = backend.bind().map_err(|e| e.to_string())?;
+                paint(
+                    renderer,
+                    &mut framebuffer,
+                    Transform::Flipped180,
+                    &picture,
+                    &screen.textures,
+                )?;
+                shoot(renderer, &framebuffer, size);
+                drop(framebuffer);
+                backend.submit(None).map_err(|e| e.to_string())?;
             }
-        }
-        screen
-            .textures
-            .retain(|id, _| layers.iter().any(|(l, _)| l == id));
-        let (renderer, mut framebuffer) = backend.bind().map_err(|e| e.to_string())?;
-        {
-            let full = Rectangle::from_size(size);
-            let mut frame = renderer
-                .render(&mut framebuffer, size, Transform::Flipped180)
-                .map_err(|e| e.to_string())?;
-            frame
-                .clear(BACKGROUND, &[full])
-                .map_err(|e| e.to_string())?;
-            for (rect, colour) in &solids {
-                frame
-                    .draw_solid(*rect, &[full], *colour)
-                    .map_err(|e| e.to_string())?;
-            }
-            for (id, dst) in &layers {
-                let Some((_, texture)) = screen.textures.get(id) else {
-                    continue;
-                };
-                let tex_size = smithay::backend::renderer::Texture::size(texture);
-                let src =
-                    Rectangle::from_size((f64::from(tex_size.w), f64::from(tex_size.h)).into());
-                let dst = Rectangle::new(
-                    (dst.loc.x as i32, dst.loc.y as i32).into(),
-                    (dst.size.w.round() as i32, dst.size.h.round() as i32).into(),
-                );
-                Frame::render_texture_from_to(
-                    &mut frame,
-                    texture,
-                    src,
-                    dst,
-                    &[full],
-                    &[],
+            Backend::Drm(drm) => {
+                // One frame on its way to the screen at a time: the next after its vblank.
+                if drm.pending || !drm.active {
+                    return Ok(());
+                }
+                for (id, _) in &layers {
+                    self.update_texture(&mut drm.renderer, &mut screen.textures, *id);
+                }
+                screen
+                    .textures
+                    .retain(|id, _| layers.iter().any(|(l, _)| l == id));
+                let (mut dmabuf, _age) = drm.surface.next_buffer().map_err(|e| e.to_string())?;
+                let mut framebuffer = drm.renderer.bind(&mut dmabuf).map_err(|e| e.to_string())?;
+                paint(
+                    &mut drm.renderer,
+                    &mut framebuffer,
                     Transform::Normal,
-                    1.0,
-                )
-                .map_err(|e| e.to_string())?;
-            }
-            if fallback {
-                // A plain pointer: the programs' own cursors come later.
-                let p = screen.pointer;
-                frame
-                    .draw_solid(
-                        Rectangle::new((p.x as i32, p.y as i32).into(), (6, 6).into()),
-                        &[full],
-                        CURSOR,
-                    )
+                    &picture,
+                    &screen.textures,
+                )?;
+                shoot(&mut drm.renderer, &framebuffer, size);
+                drop(framebuffer);
+                drm.surface
+                    .queue_buffer(None, None, ())
                     .map_err(|e| e.to_string())?;
+                drm.pending = true;
             }
-            let _ = frame.finish().map_err(|e| e.to_string())?;
         }
-        shoot(renderer, &framebuffer, size);
-        drop(framebuffer);
-        backend.submit(None).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -606,6 +815,76 @@ impl State {
         let alt = screen.held.contains(&KEY_LEFTALT) || screen.held.contains(&KEY_RIGHTALT);
         if pressed && code == KEY_BACKSPACE && ctrl && alt {
             self.toggle_fallback();
+            return true;
+        }
+        if pressed && ctrl && alt && self.switch_console(code) {
+            return true;
+        }
+        false
+    }
+
+    /// The frame queued last reached the screen: the next can be drawn.
+    pub(super) fn drm_vblank(&mut self) {
+        if let Some(Screen {
+            backend: Backend::Drm(drm),
+            ..
+        }) = &mut self.screen
+        {
+            let _ = drm.surface.frame_submitted();
+            drm.pending = false;
+        }
+    }
+
+    /// Another console took the screen, or gave it back.
+    pub(super) fn drm_session(&mut self, event: SessionEvent) {
+        let Some(Screen {
+            backend: Backend::Drm(drm),
+            textures,
+            ..
+        }) = &mut self.screen
+        else {
+            return;
+        };
+        match event {
+            SessionEvent::PauseSession => {
+                log::info!("another console has the screen");
+                drm.libinput.suspend();
+                drm.drm.pause();
+                drm.active = false;
+            }
+            SessionEvent::ActivateSession => {
+                log::info!("the screen is ours again");
+                if drm.libinput.resume().is_err() {
+                    log::warn!("libinput didn't take the devices back");
+                }
+                if let Err(error) = drm.drm.activate(true) {
+                    log::warn!("the display didn't come back: {error}");
+                }
+                drm.surface.reset_buffers();
+                drm.pending = false;
+                drm.active = true;
+                textures.clear();
+            }
+        }
+    }
+
+    /// Ctrl+Alt+F1 to F12 switch text consoles (on the computer's screen).
+    fn switch_console(&mut self, code: u32) -> bool {
+        // KEY_F1..KEY_F10 are 59..68, KEY_F11 87, KEY_F12 88.
+        let vt = match code {
+            59..=68 => code - 58,
+            87 => 11,
+            88 => 12,
+            _ => return false,
+        };
+        if let Some(Screen {
+            backend: Backend::Drm(drm),
+            ..
+        }) = &mut self.screen
+        {
+            if let Err(error) = drm.session.change_vt(vt as i32) {
+                log::warn!("console {vt}: {error}");
+            }
             return true;
         }
         false
