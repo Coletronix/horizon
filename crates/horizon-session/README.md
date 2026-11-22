@@ -27,6 +27,13 @@ With `--display`, whatever the game or a program does:
 - **`pkill -USR1 horizon-session`** (from another console, or over ssh) switches to the fallback
   desktop too; **`pkill horizon-session`** ends the session, asking programs to close first.
 
+## Locking
+
+Screen lockers that speak `ext-session-lock` (swaylock, hyprlock...) lock a session with a screen:
+it then shows only the locker, and only the locker hears the keyboard and pointer (console
+switching still works; the escape chord doesn't get past a lock). Not yet confirmed with a
+locker: hyprlock connects but waited without locking in the nested test.
+
 ## Trying the real session
 
 From a text console (Ctrl+Alt+F3, log in):

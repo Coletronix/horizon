@@ -391,6 +391,19 @@ impl State {
         self.toplevels.iter().find(|t| t.game)
     }
 
+    /// The screen's size, with one.
+    pub(super) fn screen_size(&self) -> Option<Size<i32, Physical>> {
+        self.screen.as_ref().map(|s| s.size)
+    }
+
+    /// The game's keyboard focus goes (the screen is locked).
+    pub(super) fn unfocus_game(&mut self) {
+        if let Some(screen) = &self.screen {
+            let keyboard = screen.game_keyboard.clone();
+            keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+        }
+    }
+
     /// Whether the screen shows the fallback desktop: asked for, or no game to show.
     fn fallback_shown(&self) -> bool {
         self.screen.as_ref().is_some_and(|s| s.fallback)
@@ -448,7 +461,8 @@ impl State {
                 xdg.send_pending_configure();
             }
         }
-        if let (Some(screen), Some(surface)) = (
+        if let (false, Some(screen), Some(surface)) = (
+            self.locked,
             &self.screen,
             self.game_toplevel().and_then(Toplevel::surface),
         ) {
@@ -479,6 +493,9 @@ impl State {
         self.screen = Some(screen);
         // What was shown draws its next frame.
         let time = self.time();
+        if let Some(lock) = &self.lock_surface {
+            send_frames(lock.wl_surface(), time);
+        }
         if let Some(surface) = self.game_toplevel().and_then(Toplevel::surface) {
             send_frames(&surface, time);
         }
@@ -500,7 +517,23 @@ impl State {
         let mut layers: Vec<(SurfaceId, Rectangle<f64, Logical>)> = Vec::new();
         let mut solids: Vec<(Rectangle<i32, Physical>, Color32F)> = Vec::new();
         screen.tiles.clear();
-        if fallback {
+        if self.locked {
+            // Only the locker: black until it has drawn.
+            if let Some(surface) = self.lock_surface.as_ref().map(|l| l.wl_surface().clone()) {
+                let mut own = Vec::new();
+                let mut hits = Vec::new();
+                collect_layers(&surface, (0, 0).into(), false, &mut own, &mut hits);
+                for layer in own {
+                    let at = (f64::from(layer.at[0]), f64::from(layer.at[1]));
+                    let extent = (f64::from(layer.size[0]), f64::from(layer.size[1]));
+                    layers.push((layer.surface, Rectangle::new(at.into(), extent.into())));
+                }
+            }
+            solids.push((
+                Rectangle::from_size(size),
+                Color32F::new(0.0, 0.0, 0.0, 1.0),
+            ));
+        } else if fallback {
             let shown: Vec<&Toplevel> = self.toplevels.iter().filter(|t| !t.game).collect();
             let n = shown.len().max(1) as i32;
             let cols = (f64::from(n).sqrt().ceil() as i32).max(1);
@@ -702,6 +735,10 @@ impl State {
     /// Input from the screen's devices: to the game, or on the fallback desktop to the
     /// window under the pointer.
     pub(super) fn screen_input<B: InputBackend>(&mut self, event: InputEvent<B>) {
+        if self.locked {
+            self.locked_input(event);
+            return;
+        }
         let fallback = self.fallback_shown();
         match event {
             InputEvent::Keyboard { event } => {
@@ -798,6 +835,91 @@ impl State {
             }
             _ => {}
         }
+    }
+
+    /// While locked, input reaches only the locker: keys (console switching aside), the pointer
+    /// on its surface, buttons.
+    fn locked_input<B: InputBackend>(&mut self, event: InputEvent<B>) {
+        let Some(lock) = self.lock_surface.as_ref().map(|l| l.wl_surface().clone()) else {
+            return;
+        };
+        let serial = SERIAL_COUNTER.next_serial();
+        let time = self.time();
+        match event {
+            InputEvent::Keyboard { event } => {
+                let code = event.key_code().raw().saturating_sub(8);
+                let pressed = event.state() == KeyState::Pressed;
+                if let Some(screen) = &mut self.screen {
+                    if pressed {
+                        screen.held.insert(code);
+                    } else {
+                        screen.held.remove(&code);
+                    }
+                    let ctrl =
+                        screen.held.contains(&KEY_LEFTCTRL) || screen.held.contains(&KEY_RIGHTCTRL);
+                    let alt =
+                        screen.held.contains(&KEY_LEFTALT) || screen.held.contains(&KEY_RIGHTALT);
+                    if pressed && ctrl && alt && self.switch_console(code) {
+                        return;
+                    }
+                }
+                let keyboard = self.keyboard.clone();
+                if keyboard.current_focus().as_ref() != Some(&lock) {
+                    keyboard.set_focus(self, Some(lock.clone()), serial);
+                }
+                keyboard.input::<(), _>(
+                    self,
+                    event.key_code(),
+                    event.state(),
+                    serial,
+                    time,
+                    |_, _, _| FilterResult::Forward,
+                );
+            }
+            InputEvent::PointerMotionAbsolute { event } => {
+                let Some(size) = self.screen_size() else {
+                    return;
+                };
+                let at = event.position_transformed((size.w, size.h).into());
+                self.locked_pointer(lock, at);
+            }
+            InputEvent::PointerMotion { event } => {
+                let Some(screen) = &self.screen else { return };
+                let at = screen.pointer + event.delta();
+                self.locked_pointer(lock, at);
+            }
+            InputEvent::PointerButton { event } => {
+                let pointer = self.pointer.clone();
+                pointer.button(
+                    self,
+                    &ButtonEvent {
+                        serial,
+                        time,
+                        button: event.button_code(),
+                        state: event.state(),
+                    },
+                );
+                pointer.frame(self);
+            }
+            _ => {}
+        }
+    }
+
+    fn locked_pointer(&mut self, lock: WlSurface, at: Point<f64, Logical>) {
+        if let Some(screen) = &mut self.screen {
+            screen.pointer = at;
+        }
+        let pointer = self.pointer.clone();
+        pointer.motion(
+            self,
+            Some((lock, (0.0, 0.0).into())),
+            &MotionEvent {
+                location: at,
+                serial: SERIAL_COUNTER.next_serial(),
+                time: self.time(),
+            },
+        );
+        pointer.frame(self);
     }
 
     /// The escape chord: Ctrl+Alt+Backspace shows the fallback desktop, and again the game.

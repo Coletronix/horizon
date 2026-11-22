@@ -229,6 +229,10 @@ pub struct State {
     old_dmabuf_globals: Vec<DmabufGlobal>,
     /// X11 menus and tooltips (override-redirect windows) on screen.
     x11_menus: Vec<X11Surface>,
+    /// Screen lockers (swaylock, hyprlock...): while locked the screen shows only the locker.
+    lock_state: smithay::wayland::session_lock::SessionLockManagerState,
+    locked: bool,
+    lock_surface: Option<smithay::wayland::session_lock::LockSurface>,
     /// The session's own screen, with `--display`.
     screen: Option<display::Screen>,
     /// The game's process, from its control connection: its window is the one the screen shows.
@@ -403,6 +407,12 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
         dmabuf_narrowed: false,
         old_dmabuf_globals: Vec::new(),
         x11_menus: Vec::new(),
+        lock_state: smithay::wayland::session_lock::SessionLockManagerState::new::<State, _>(
+            &dh2,
+            |_| true,
+        ),
+        locked: false,
+        lock_surface: None,
         screen: None,
         game_pid: None,
         _relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState::new::<
@@ -2185,6 +2195,58 @@ impl smithay::wayland::pointer_constraints::PointerConstraintsHandler for State 
     }
 }
 
+/// Screen lockers. Only a session with a screen can lock: without one, the desktop around it
+/// does its own locking, and a lock here is refused.
+impl smithay::wayland::session_lock::SessionLockHandler for State {
+    fn lock_state(&mut self) -> &mut smithay::wayland::session_lock::SessionLockManagerState {
+        &mut self.lock_state
+    }
+
+    fn lock(&mut self, confirmation: smithay::wayland::session_lock::SessionLocker) {
+        if self.screen.is_none() {
+            return;
+        }
+        log::info!("the screen is locked");
+        self.locked = true;
+        // Nothing but the locker hears the keyboard from now on.
+        let serial = SERIAL_COUNTER.next_serial();
+        let keyboard = self.keyboard.clone();
+        keyboard.set_focus(self, None, serial);
+        self.unfocus_game();
+        confirmation.lock();
+    }
+
+    fn unlock(&mut self) {
+        log::info!("the screen is unlocked");
+        self.locked = false;
+        self.lock_surface = None;
+        let serial = SERIAL_COUNTER.next_serial();
+        self.focus(self.focused, serial);
+        self.configure_game();
+    }
+
+    fn new_surface(
+        &mut self,
+        surface: smithay::wayland::session_lock::LockSurface,
+        _output: smithay::reexports::wayland_server::protocol::wl_output::WlOutput,
+    ) {
+        if let Some(size) = self.screen_size() {
+            surface.with_pending_state(|state| {
+                state.size = Some((size.w as u32, size.h as u32).into());
+            });
+        }
+        surface.send_configure();
+        let keyboard = self.keyboard.clone();
+        keyboard.set_focus(
+            self,
+            Some(surface.wl_surface().clone()),
+            SERIAL_COUNTER.next_serial(),
+        );
+        self.lock_surface = Some(surface);
+    }
+}
+
+smithay::delegate_session_lock!(State);
 smithay::delegate_pointer_constraints!(State);
 smithay::delegate_relative_pointer!(State);
 smithay::delegate_xwayland_shell!(State);
