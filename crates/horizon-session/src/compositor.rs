@@ -39,7 +39,7 @@ use smithay::{
             protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_shm, wl_surface::WlSurface},
         },
     },
-    utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Transform},
+    utils::{IsAlive, Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -177,6 +177,9 @@ pub struct State {
     programs: Programs,
     /// A signal asked the session to end.
     stopping: bool,
+    /// A menu that asked for a grab, and its window's surface: it has the keyboard, and a click
+    /// anywhere else closes it (and every menu of that window).
+    popup_grab: Option<(WlSurface, WlSurface)>,
     /// Names this run of the session for the game ([`ToGame::Hello`]).
     instance: u64,
     /// `--spawn` programs, held until a game says which GPU buffers it imports (else GPU programs
@@ -315,6 +318,7 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
         programs: Programs::default(),
         stopping: false,
         instance: instance_number(),
+        popup_grab: None,
         held_spawns: options.spawn.clone(),
     };
     let mut supervised = (!options.game.is_empty())
@@ -684,6 +688,12 @@ impl State {
                 let Some(toplevel) = self.toplevel(window) else {
                     return;
                 };
+                log::trace!(
+                    "pointer on window {} at {:.1} {:.1}",
+                    window.0,
+                    at[0],
+                    at[1]
+                );
                 // The topmost surface under the pointer; both in the window's space.
                 let location = Point::<f64, Logical>::from((at[0], at[1]));
                 let focus = toplevel
@@ -718,6 +728,11 @@ impl State {
                 pointer.frame(self);
             }
             Input::PointerButton { button, pressed } => {
+                // A click outside a grabbing menu closes the menus, and does nothing else.
+                if pressed && self.popup_grab_outside() {
+                    self.end_popup_grab(serial);
+                    return;
+                }
                 let pointer = self.pointer.clone();
                 pointer.button(
                     self,
@@ -779,7 +794,12 @@ impl State {
                     |_, _, _| FilterResult::Forward,
                 );
             }
-            Input::Focus(window) => self.focus(window, serial),
+            Input::Focus(window) => {
+                if self.popup_grab.is_some() {
+                    self.end_popup_grab(serial);
+                }
+                self.focus(window, serial);
+            }
             Input::Resize { window, size } => {
                 log::debug!("asking window {} to be {}x{}", window.0, size[0], size[1]);
                 if let Some(toplevel) = self.toplevel(window) {
@@ -817,6 +837,33 @@ impl State {
                 }
             }
         }
+    }
+
+    /// Whether a menu grabs the pointer and the pointer is on none of its window's menus.
+    fn popup_grab_outside(&mut self) -> bool {
+        let Some((root, popup)) = &self.popup_grab else {
+            return false;
+        };
+        if !popup.alive() {
+            self.popup_grab = None;
+            return false;
+        }
+        let on = self.pointer.current_focus();
+        !PopupManager::popups_for_surface(root)
+            .any(|(menu, _)| on.as_ref() == Some(menu.wl_surface()))
+    }
+
+    /// Close every menu of the grabbing window, and give the keyboard back to the window.
+    fn end_popup_grab(&mut self, serial: Serial) {
+        let Some((root, _)) = self.popup_grab.take() else {
+            return;
+        };
+        log::debug!("closing the grabbing window's menus");
+        for (menu, _) in PopupManager::popups_for_surface(&root) {
+            let _ = PopupManager::dismiss_popup(&root, &menu);
+        }
+        self.focus(self.focused, serial);
+        self.dirty = true;
     }
 
     fn focus(&mut self, window: Option<WindowId>, serial: Serial) {
@@ -1398,6 +1445,14 @@ impl CompositorHandler for State {
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
+        if self
+            .popup_grab
+            .as_ref()
+            .is_some_and(|(_, popup)| popup == surface)
+        {
+            self.popup_grab = None;
+            self.focus(self.focused, SERIAL_COUNTER.next_serial());
+        }
         let id = with_states(surface, |states| {
             states.data_map.get::<Mutex<SurfaceData>>().map(|data| {
                 let mut data = data.lock().unwrap_or_else(|p| p.into_inner());
@@ -1465,6 +1520,7 @@ impl XdgShellHandler for State {
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+        log::debug!("a menu opened");
         self.output.enter(surface.wl_surface());
         if let Err(error) = self.popups.track_popup(PopupKind::Xdg(surface)) {
             log::warn!("a popup couldn't be tracked: {error}");
@@ -1485,9 +1541,18 @@ impl XdgShellHandler for State {
         self.dirty = true;
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {
-        // Popup grabs (a menu closing on a click outside it) come with the interaction model;
-        // until then a menu closes when the program closes it.
+    fn grab(&mut self, surface: PopupSurface, _seat: WlSeat, serial: Serial) {
+        log::debug!("a menu grabs the keyboard and pointer");
+        // The menu takes the keyboard (arrows, Enter, Escape move through it) until it closes
+        // or a click lands outside it.
+        let kind = PopupKind::Xdg(surface.clone());
+        let Ok(root) = smithay::desktop::find_popup_root_surface(&kind) else {
+            let _ = PopupManager::dismiss_popup(surface.wl_surface(), &kind);
+            return;
+        };
+        let keyboard = self.keyboard.clone();
+        keyboard.set_focus(self, Some(surface.wl_surface().clone()), serial);
+        self.popup_grab = Some((root, surface.wl_surface().clone()));
     }
 
     fn title_changed(&mut self, _surface: ToplevelSurface) {
