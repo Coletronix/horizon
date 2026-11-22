@@ -84,6 +84,27 @@ impl Placed {
     }
 }
 
+/// What holds a lead's other end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Tether {
+    /// The player: the window follows them.
+    Player,
+    /// A block the lead was tied to: the window stays near it.
+    Post([i32; 3]),
+}
+
+/// The lead's item key, resolved at registration.
+static LEAD: OnceLock<mod_api::ItemKey> = OnceLock::new();
+
+/// Whether the local player holds a lead in their main hand.
+fn holding_lead(host: &dyn ClientHost) -> bool {
+    let Some(lead) = LEAD.get() else { return false };
+    host.camera_entity()
+        .and_then(|e| host.living(e))
+        .and_then(|l| l.hand_item(host, mod_api::Hand::Main))
+        .is_some_and(|stack| stack.item() == *lead)
+}
+
 /// What the crosshair is on this frame.
 #[derive(Clone, Copy, Debug)]
 struct Gaze {
@@ -155,6 +176,8 @@ struct State {
     world: String,
     /// The dimension, from the last level load.
     dimension: String,
+    /// Windows on a lead, and what holds the other end.
+    leashed: std::collections::BTreeMap<WindowId, Tether>,
     /// Since when the player has been playing (no screen over the world).
     playing_since: Option<Instant>,
     /// The player has been playing a moment: new windows can be placed in front of them.
@@ -411,6 +434,7 @@ impl WmWorld {
             None
         };
         self.carry(&mut state, eye, dir);
+        self.follow(&mut state, eye);
         self.separate(&mut state);
         self.drag(&mut state, wm, eye, dir);
         self.mine(&mut state, wm);
@@ -559,6 +583,45 @@ impl WmWorld {
             ..pose
         };
         state.changed();
+    }
+
+    /// Leashed windows follow what holds their lead, as a leashed mob does: past a few blocks
+    /// they're drawn in, turning to face it.
+    fn follow(&self, state: &mut State, eye: V3) {
+        const SLACK: f64 = 2.5;
+        const PULL: f64 = 0.12;
+        let leashed: Vec<(WindowId, Tether)> =
+            state.leashed.iter().map(|(w, t)| (*w, *t)).collect();
+        for (window, tether) in leashed {
+            if state.carry.is_some_and(|c| c.window == window) {
+                continue;
+            }
+            let anchor = match tether {
+                Tether::Player => eye,
+                Tether::Post(p) => [
+                    f64::from(p[0]) + 0.5,
+                    f64::from(p[1]) + 1.5,
+                    f64::from(p[2]) + 0.5,
+                ],
+            };
+            let here = state.placed(window).is_some_and(|p| state.here(p));
+            let Some(placed) = state.placed_mut(window).filter(|_| here) else {
+                continue;
+            };
+            let to = space::sub(anchor, placed.pose.centre);
+            let distance = space::dot(to, to).sqrt();
+            let reach = SLACK + f64::from(placed.size[0]) * placed.pixel / 2.0;
+            if distance > reach {
+                placed.pose.centre = space::add(
+                    placed.pose.centre,
+                    space::mul(to, PULL * (distance - reach) / distance),
+                );
+                // Face what pulls it: the view from the anchor looks at the window.
+                let back = space::sub(placed.pose.centre, anchor);
+                placed.pose.yaw = (-back[0]).atan2(back[2]).to_degrees() as f32;
+                state.changed();
+            }
+        }
     }
 
     /// Windows that overlap push each other apart, a little each frame, as mobs do: the one being
@@ -926,6 +989,13 @@ impl WmWorld {
                 let Some(placed) = state.placed(gaze.window).cloned() else {
                     return Flow::Continue;
                 };
+                if button == button::RIGHT && holding_lead(host) {
+                    // A lead on the window, or off it.
+                    if state.leashed.remove(&gaze.window).is_none() {
+                        state.leashed.insert(gaze.window, Tether::Player);
+                    }
+                    return Flow::Cancel;
+                }
                 match (button, part) {
                     (b, _) if b == button::LEFT => {
                         state.mining = Some((gaze.window, Instant::now()));
@@ -1100,6 +1170,7 @@ impl Hooks for Hooked {
         // Optional: a server without this mod still lets the player in (windows are put away
         // instead of becoming items).
         items::set_key(r.item_key(items::WINDOW_ITEM));
+        let _ = LEAD.set(r.item_key("minecraft:lead"));
         let app = r.item_key(apps::APP_ITEM);
         apps::set_key(app);
         r.item_part(app, Dispensable);
@@ -1220,6 +1291,33 @@ impl Hooks for Hooked {
                     }
                 }
             }
+        }
+        *event.cancellation_result = mod_api::InteractionResult::Success;
+        Flow::Cancel
+    }
+
+    fn right_click_block(
+        &self,
+        host: mod_api::HostSide,
+        event: &mut mod_api::RightClickBlockEvent<'_>,
+    ) -> Flow {
+        // With windows following on leads, a click on a block with the lead ties them to it.
+        let mod_api::HostSide::Client(host) = host else {
+            return Flow::Continue;
+        };
+        if !holding_lead(&*host) {
+            return Flow::Continue;
+        }
+        let mut state = this().lock();
+        let mut tied = false;
+        for tether in state.leashed.values_mut() {
+            if *tether == Tether::Player {
+                *tether = Tether::Post(event.click.pos);
+                tied = true;
+            }
+        }
+        if !tied {
+            return Flow::Continue;
         }
         *event.cancellation_result = mod_api::InteractionResult::Success;
         Flow::Cancel

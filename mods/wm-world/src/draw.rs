@@ -73,6 +73,7 @@ pub fn world(state: &State, windows: &[Window], event: &mut RenderLevelStageEven
     {
         ghost(placed, drag.asked, event);
     }
+    leads(state, eye, event);
 }
 
 /// The slab: back and sides, the bezel and the dark screen behind the window's pixels.
@@ -212,6 +213,41 @@ fn layers(placed: &Placed, window: &Window, event: &mut RenderLevelStageEvent<'_
         let _ = event
             .draw
             .live_quads(&layer.texture, &[quad], WorldDepth::Tested);
+    }
+}
+
+/// Each lead, from the top of its window to what holds it: the player's hand or a post.
+fn leads(state: &State, eye: V3, event: &mut RenderLevelStageEvent<'_>) {
+    const LEAD_COLOUR: u32 = 0xFF6B4A2B;
+    let lines: Vec<WorldLine> = state
+        .leashed
+        .iter()
+        .filter_map(|(window, tether)| {
+            let placed = state.placed(*window).filter(|p| state.here(p))?;
+            let top = placed.pose.at(
+                0.0,
+                f64::from(placed.size[1]) * placed.pixel / 2.0 + BEZEL,
+                0.0,
+            );
+            let end = match tether {
+                crate::Tether::Player => [eye[0], eye[1] - 0.5, eye[2]],
+                crate::Tether::Post(p) => [
+                    f64::from(p[0]) + 0.5,
+                    f64::from(p[1]) + 0.75,
+                    f64::from(p[2]) + 0.5,
+                ],
+            };
+            Some(WorldLine::new(
+                top,
+                end,
+                LEAD_COLOUR,
+                2.0,
+                WorldDepth::Tested,
+            ))
+        })
+        .collect();
+    if !lines.is_empty() {
+        let _ = event.draw.lines(&lines);
     }
 }
 
