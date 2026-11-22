@@ -52,14 +52,28 @@ impl Presenter for Panels {
                 .filter(|w| w.mapped())
                 .map(|w| w.size[0] as f64 / PIXELS_PER_BLOCK + 0.25)
                 .sum();
-            let centre = [eye[0] + forward[0] * 3.0, eye[1] + 0.5, eye[2] + forward[2] * 3.0];
+            let centre = [
+                eye[0] + forward[0] * 3.0,
+                eye[1] + 0.5,
+                eye[2] + forward[2] * 3.0,
+            ];
             let half = width.max(1.0) / 2.0;
             Anchor {
-                corner: [centre[0] - right[0] * half, centre[1], centre[2] - right[2] * half],
+                corner: [
+                    centre[0] - right[0] * half,
+                    centre[1],
+                    centre[2] - right[2] * half,
+                ],
                 right,
             }
         });
-        let at = |x: f64, y: f64| [corner[0] + right[0] * x, corner[1] - y, corner[2] + right[2] * x];
+        let at = |x: f64, y: f64| {
+            [
+                corner[0] + right[0] * x,
+                corner[1] - y,
+                corner[2] + right[2] * x,
+            ]
+        };
         let mut x = 0.0;
         for window in windows.iter().filter(|w| w.mapped()) {
             for layer in &window.layers {

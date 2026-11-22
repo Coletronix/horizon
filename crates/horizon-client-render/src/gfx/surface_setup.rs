@@ -212,9 +212,10 @@ pub(super) async fn open_adapter(
     let dmabuf = horizon_dmabuf::caps(&device);
     startup_step(format_args!(
         "dmabuf import: {}",
-        dmabuf
-            .as_ref()
-            .map_or("none".to_string(), |caps| format!("{} formats", caps.formats.len()))
+        dmabuf.as_ref().map_or("none".to_string(), |caps| format!(
+            "{} formats",
+            caps.formats.len()
+        ))
     ));
     horizon_live_texture::set_dmabuf_caps(dmabuf);
     let device_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -128,7 +128,9 @@ mod vulkan {
             .iter()
             .any(|e| e.extension_name_as_c_str() == Ok(ash::ext::physical_device_drm::NAME))
         {
-            log::info!("Horizon dmabuf: the GPU doesn't name its DRM node (VK_EXT_physical_device_drm)");
+            log::info!(
+                "Horizon dmabuf: the GPU doesn't name its DRM node (VK_EXT_physical_device_drm)"
+            );
             return None;
         }
         let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
@@ -154,14 +156,18 @@ mod vulkan {
         let mut list = vk::DrmFormatModifierPropertiesListEXT::default();
         let mut properties = vk::FormatProperties2::default().push_next(&mut list);
         // Safety: the device's own physical device; the list asks for its count first.
-        unsafe { instance.get_physical_device_format_properties2(physical, format, &mut properties) };
+        unsafe {
+            instance.get_physical_device_format_properties2(physical, format, &mut properties)
+        };
         let count = list.drm_format_modifier_count as usize;
         let mut modifiers = vec![vk::DrmFormatModifierPropertiesEXT::default(); count];
-        let mut list =
-            vk::DrmFormatModifierPropertiesListEXT::default().drm_format_modifier_properties(&mut modifiers);
+        let mut list = vk::DrmFormatModifierPropertiesListEXT::default()
+            .drm_format_modifier_properties(&mut modifiers);
         let mut properties = vk::FormatProperties2::default().push_next(&mut list);
         // Safety: as above, with room for every modifier.
-        unsafe { instance.get_physical_device_format_properties2(physical, format, &mut properties) };
+        unsafe {
+            instance.get_physical_device_format_properties2(physical, format, &mut properties)
+        };
         modifiers
             .iter()
             .filter(|m| {
@@ -193,7 +199,8 @@ mod vulkan {
             .push_next(&mut external)
             .push_next(&mut drm);
         let mut external_properties = vk::ExternalImageFormatProperties::default();
-        let mut properties = vk::ImageFormatProperties2::default().push_next(&mut external_properties);
+        let mut properties =
+            vk::ImageFormatProperties2::default().push_next(&mut external_properties);
         // Safety: the device's own physical device; every chained structure is the extension's.
         let ok = unsafe {
             instance.get_physical_device_image_format_properties2(physical, &info, &mut properties)
@@ -207,7 +214,10 @@ mod vulkan {
 
     pub(super) fn import(device: &wgpu::Device, buffer: &Dmabuf) -> Result<wgpu::Texture, String> {
         let [plane] = buffer.planes.as_slice() else {
-            return Err(format!("{} planes; only single-plane buffers import", buffer.planes.len()));
+            return Err(format!(
+                "{} planes; only single-plane buffers import",
+                buffer.planes.len()
+            ));
         };
         let (format, _) = texture_format(buffer.fourcc)
             .ok_or_else(|| format!("fourcc {:#010x} isn't imported", buffer.fourcc))?;
@@ -265,7 +275,11 @@ mod vulkan {
         // the producer's, so it is wrapped as initialized and sampled where it lies: wgpu would
         // clear an uninitialized texture before its first use.
         Ok(unsafe {
-            device.create_texture_from_hal::<Vulkan>(hal_texture, &desc, wgpu::TextureUses::RESOURCE)
+            device.create_texture_from_hal::<Vulkan>(
+                hal_texture,
+                &desc,
+                wgpu::TextureUses::RESOURCE,
+            )
         })
     }
 }

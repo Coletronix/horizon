@@ -107,7 +107,13 @@ pub enum Input {
 pub trait Presenter: Send + Sync + 'static {
     /// Draw on the GUI, over everything else, once a frame. `host` is the game: its camera, its
     /// screen, the player.
-    fn draw_gui(&self, host: &dyn ClientHost, wm: &Wm, windows: &[Window], draw: &mut dyn DrawContext) {
+    fn draw_gui(
+        &self,
+        host: &dyn ClientHost,
+        wm: &Wm,
+        windows: &[Window],
+        draw: &mut dyn DrawContext,
+    ) {
         let _ = (host, wm, windows, draw);
     }
     /// Draw in the world, at each of a world view's stages (`event.stage`): windows on blocks,

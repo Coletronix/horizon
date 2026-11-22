@@ -1032,7 +1032,12 @@ mod tests {
             quad([32.0, 32.0, 64.0, 64.0], 2.0, white),
         ]
         .concat();
-        let run = |slot, stage, quads| PipelineRun { slot, texture: 0, stage, quads };
+        let run = |slot, stage, quads| PipelineRun {
+            slot,
+            texture: 0,
+            stage,
+            quads,
+        };
         let runs = [run(0, 0, 2), run(1, 2, 1), run(3, 0, 1), run(4, 0, 1)];
         let batch = Batch {
             set: Some(&set),

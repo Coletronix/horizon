@@ -21,9 +21,7 @@ use smithay::{
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::{FilterResult, KeyboardHandle, XkbConfig},
-        pointer::{
-            AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent, PointerHandle,
-        },
+        pointer::{AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent, PointerHandle},
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
@@ -341,7 +339,11 @@ impl State {
             Command::FrameDone => {
                 let time = self.time();
                 for toplevel in &self.toplevels {
-                    let surface = toplevel.window.toplevel().expect("wayland window").wl_surface();
+                    let surface = toplevel
+                        .window
+                        .toplevel()
+                        .expect("wayland window")
+                        .wl_surface();
                     send_frames(surface, time);
                     for (popup, _) in PopupManager::popups_for_surface(surface) {
                         send_frames(popup.wl_surface(), time);
@@ -462,15 +464,19 @@ impl State {
                 if let Some(toplevel) = self.toplevel(window) {
                     let surface = toplevel.window.toplevel().expect("wayland window");
                     surface.with_pending_state(|state| {
-                        state.size = (size[0] > 0 && size[1] > 0)
-                            .then(|| (size[0], size[1]).into());
+                        state.size =
+                            (size[0] > 0 && size[1] > 0).then(|| (size[0], size[1]).into());
                     });
                     surface.send_pending_configure();
                 }
             }
             Input::Close(window) => {
                 if let Some(toplevel) = self.toplevel(window) {
-                    toplevel.window.toplevel().expect("wayland window").send_close();
+                    toplevel
+                        .window
+                        .toplevel()
+                        .expect("wayland window")
+                        .send_close();
                 }
             }
         }
@@ -490,10 +496,13 @@ impl State {
                     .send_pending_configure();
             }
         }
-        let surface = self
-            .focused
-            .and_then(|id| self.toplevel(id))
-            .map(|t| t.window.toplevel().expect("wayland window").wl_surface().clone());
+        let surface = self.focused.and_then(|id| self.toplevel(id)).map(|t| {
+            t.window
+                .toplevel()
+                .expect("wayland window")
+                .wl_surface()
+                .clone()
+        });
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, surface, serial);
         self.dirty = true;
@@ -552,14 +561,14 @@ impl State {
                 };
                 let damage = std::mem::take(&mut attributes.damage);
                 let scale = attributes.buffer_scale.max(1);
-                let texture = states
-                    .data_map
-                    .get_or_insert_threadsafe(|| Mutex::new(SurfaceTexture {
+                let texture = states.data_map.get_or_insert_threadsafe(|| {
+                    Mutex::new(SurfaceTexture {
                         texture: LiveTexture::new(0, 0),
                         held: None,
                         size: [0, 0],
                         mapped: false,
-                    }));
+                    })
+                });
                 let mut texture = texture.lock().unwrap_or_else(|p| p.into_inner());
                 match assignment {
                     BufferAssignment::Removed => {
@@ -597,10 +606,11 @@ impl State {
                     BufferAssignment::NewBuffer(buffer) => {
                         let imported = import(&buffer, &texture.texture, &damage, scale);
                         if imported.is_none() {
-                            log::warn!("wayland_wm: a buffer couldn't be read (not wl_shm, or a format it doesn't copy)");
+                            log::warn!(
+                                "wayland_wm: a buffer couldn't be read (not wl_shm, or a format it doesn't copy)"
+                            );
                         }
-                        if let Some([width, height]) = imported
-                        {
+                        if let Some([width, height]) = imported {
                             let size = [width as i32 / scale, height as i32 / scale];
                             changed |= !texture.mapped || texture.size != size;
                             texture.size = size;
@@ -640,7 +650,13 @@ impl State {
                 // is what xdg geometry says, else all of them.
                 let mut layers = Vec::new();
                 let mut hits = Vec::new();
-                collect_layers(surface.wl_surface(), (0, 0).into(), false, &mut layers, &mut hits);
+                collect_layers(
+                    surface.wl_surface(),
+                    (0, 0).into(),
+                    false,
+                    &mut layers,
+                    &mut hits,
+                );
                 let geometry = with_states(surface.wl_surface(), |states| {
                     states
                         .cached_state
@@ -755,7 +771,12 @@ fn collect_layers(
 
 /// Copy a committed buffer's damage into `texture`; its size in buffer pixels, or `None` for a
 /// buffer this compositor can't read (not wl_shm, an unknown format).
-fn import(buffer: &WlBuffer, texture: &LiveTexture, damage: &[Damage], scale: i32) -> Option<[u32; 2]> {
+fn import(
+    buffer: &WlBuffer,
+    texture: &LiveTexture,
+    damage: &[Damage],
+    scale: i32,
+) -> Option<[u32; 2]> {
     with_buffer_contents(buffer, |ptr, len, data| {
         let format = match data.format {
             wl_shm::Format::Argb8888 => LivePixelFormat::Bgra8,
@@ -891,7 +912,9 @@ impl CompositorHandler for State {
             let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) else {
                 return;
             };
-            let Some(client) = surface.client() else { return };
+            let Some(client) = surface.client() else {
+                return;
+            };
             let inserted = state.handle.insert_source(source, move |_, _, state| {
                 let display = state.display.clone();
                 state
@@ -980,7 +1003,10 @@ impl XdgShellHandler for State {
         if self.focused.is_some_and(|id| gone.contains(&id)) {
             self.focused = None;
         }
-        if self.pointer_window.is_some_and(|(id, _)| gone.contains(&id)) {
+        if self
+            .pointer_window
+            .is_some_and(|(id, _)| gone.contains(&id))
+        {
             self.pointer_window = None;
         }
         self.dirty = true;
@@ -993,7 +1019,12 @@ impl XdgShellHandler for State {
         }
     }
 
-    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
+    fn reposition_request(
+        &mut self,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
+    ) {
         surface.with_pending_state(|state| {
             state.geometry = positioner.get_geometry();
             state.positioner = positioner;
@@ -1053,7 +1084,12 @@ impl DmabufHandler for State {
         &mut self.dmabuf
     }
 
-    fn dmabuf_imported(&mut self, _global: &DmabufGlobal, _dmabuf: Dmabuf, notifier: ImportNotifier) {
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        _dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
         // Only layouts the renderer imports are offered; a buffer it still can't read keeps the
         // window's last picture (the renderer logs why).
         let _ = notifier.successful::<State>();

@@ -19,11 +19,11 @@ mod animate;
 pub mod cit_glint;
 mod clip_corner;
 mod gui_sprite;
+mod live;
 mod menu_pictures;
 mod model_reducing;
 mod pack_text;
 pub mod pictures;
-mod live;
 pub(crate) mod sprite_modifiers;
 
 /// A sprite's atlas region, and its size in GUI pixels: the size of the

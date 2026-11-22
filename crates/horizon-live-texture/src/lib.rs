@@ -75,12 +75,7 @@ impl Region {
     pub fn clamp(self, width: u32, height: u32) -> Self {
         let x = self.x.min(width);
         let y = self.y.min(height);
-        Self::new(
-            x,
-            y,
-            self.width.min(width - x),
-            self.height.min(height - y),
-        )
+        Self::new(x, y, self.width.min(width - x), self.height.min(height - y))
     }
     /// The smallest region holding both.
     pub fn union(self, other: Self) -> Self {
@@ -179,7 +174,9 @@ impl Synced<'_> {
             .log
             .iter()
             .filter(|(generation, _)| *generation > self.from)
-            .fold(Region::default(), |region, (_, damage)| region.union(*damage));
+            .fold(Region::default(), |region, (_, damage)| {
+                region.union(*damage)
+            });
         Sync::Damage {
             width: state.width,
             region,
@@ -453,14 +450,19 @@ fn copy_region(
         let dst = &mut mirror[y * row + x0..y * row + x1];
         let (rgb, opaque) = (format.rgb_order(), format.opaque());
         for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-            let [r, g, b] = if rgb { [s[0], s[1], s[2]] } else { [s[2], s[1], s[0]] };
+            let [r, g, b] = if rgb {
+                [s[0], s[1], s[2]]
+            } else {
+                [s[2], s[1], s[0]]
+            };
             let a = if opaque { 255 } else { s[3] };
             *<&mut [u8; 4]>::try_from(d).expect("4 bytes") = if a == 255 {
                 [r, g, b, 255]
             } else if a == 0 {
                 [0, 0, 0, 0]
             } else {
-                let straight = |c: u8| ((u32::from(c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
+                let straight =
+                    |c: u8| ((u32::from(c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
                 [straight(r), straight(g), straight(b), a]
             };
         }
@@ -491,8 +493,22 @@ mod tests {
         let (seen, kind) = sync_kind(&texture, 0);
         assert_eq!(kind, "full 4x4");
         let frame = vec![0x80u8; 4 * 4 * 4];
-        texture.write(4, 4, 16, PixelFormat::Rgba8, &frame, &[Region::new(1, 1, 1, 1)]);
-        texture.write(4, 4, 16, PixelFormat::Rgba8, &frame, &[Region::new(3, 2, 1, 2)]);
+        texture.write(
+            4,
+            4,
+            16,
+            PixelFormat::Rgba8,
+            &frame,
+            &[Region::new(1, 1, 1, 1)],
+        );
+        texture.write(
+            4,
+            4,
+            16,
+            PixelFormat::Rgba8,
+            &frame,
+            &[Region::new(3, 2, 1, 2)],
+        );
         let (seen, kind) = sync_kind(&texture, seen);
         assert_eq!(kind, "damage 1 1 3 3");
         assert_eq!(sync_kind(&texture, seen).1, "unchanged");
@@ -503,11 +519,25 @@ mod tests {
         let texture = LiveTexture::new(2, 2);
         let (seen, _) = sync_kind(&texture, 0);
         let frame = vec![0u8; 3 * 3 * 4];
-        texture.write(3, 3, 12, PixelFormat::Rgba8, &frame, &[Region::new(0, 0, 1, 1)]);
+        texture.write(
+            3,
+            3,
+            12,
+            PixelFormat::Rgba8,
+            &frame,
+            &[Region::new(0, 0, 1, 1)],
+        );
         let (seen, kind) = sync_kind(&texture, seen);
         assert_eq!(kind, "full 3x3");
         for _ in 0..LOG + 1 {
-            texture.write(3, 3, 12, PixelFormat::Rgba8, &frame, &[Region::new(0, 0, 1, 1)]);
+            texture.write(
+                3,
+                3,
+                12,
+                PixelFormat::Rgba8,
+                &frame,
+                &[Region::new(0, 0, 1, 1)],
+            );
         }
         assert_eq!(sync_kind(&texture, seen).1, "full 3x3");
     }

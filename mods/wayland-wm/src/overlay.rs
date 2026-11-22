@@ -10,7 +10,13 @@ pub(crate) fn enabled() -> bool {
 pub(crate) struct Overlay;
 
 impl Presenter for Overlay {
-    fn draw_gui(&self, _host: &dyn ClientHost, _wm: &Wm, windows: &[Window], draw: &mut dyn DrawContext) {
+    fn draw_gui(
+        &self,
+        _host: &dyn ClientHost,
+        _wm: &Wm,
+        windows: &[Window],
+        draw: &mut dyn DrawContext,
+    ) {
         let shown: Vec<&Window> = windows.iter().filter(|w| w.mapped()).collect();
         if shown.is_empty() {
             return;
@@ -24,8 +30,15 @@ impl Presenter for Overlay {
             let scale = (cell_w / w).min(cell_h / h);
             let x0 = margin + i as f32 * (cell_w + margin);
             let y0 = margin + 10.0;
-            let border = if window.focused { 0xFF55AAFF } else { 0xFF333333 };
-            draw.fill([x0 - 1.0, y0 - 1.0, w * scale + 2.0, h * scale + 2.0], border);
+            let border = if window.focused {
+                0xFF55AAFF
+            } else {
+                0xFF333333
+            };
+            draw.fill(
+                [x0 - 1.0, y0 - 1.0, w * scale + 2.0, h * scale + 2.0],
+                border,
+            );
             draw.text(&window.title, [x0, y0 - 10.0], 0xFFFFFFFF, true);
             for layer in &window.layers {
                 let [lx, ly] = layer.at.map(|v| v as f32);

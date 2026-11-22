@@ -91,7 +91,13 @@ impl LiveTextures {
                         self.entries.insert(texture.id(), entry);
                     }
                     let entry = self.entries.get_mut(&texture.id()).expect("just inserted");
-                    uploads.texture(encoder, entry.texture.as_image_copy(), width, height, pixels);
+                    uploads.texture(
+                        encoder,
+                        entry.texture.as_image_copy(),
+                        width,
+                        height,
+                        pixels,
+                    );
                     entry.generation = synced.generation;
                 }
                 Sync::Damage {
@@ -104,7 +110,10 @@ impl LiveTextures {
                     };
                     if !region.is_empty() {
                         let row = width as usize * 4;
-                        let (x0, x1) = (region.x as usize * 4, (region.x + region.width) as usize * 4);
+                        let (x0, x1) = (
+                            region.x as usize * 4,
+                            (region.x + region.width) as usize * 4,
+                        );
                         let mut bytes = Vec::with_capacity((x1 - x0) * region.height as usize);
                         for y in region.y as usize..(region.y + region.height) as usize {
                             bytes.extend_from_slice(&pixels[y * row + x0..y * row + x1]);
@@ -162,11 +171,15 @@ impl LiveTextures {
         };
         if self.entries.get(&id).is_none_or(|e| e.size != size) {
             self.versions += 1;
-            self.entries.insert(id, new_entry(device, size, self.versions));
+            self.entries
+                .insert(id, new_entry(device, size, self.versions));
         }
         let blit = self.blit.get_or_insert_with(|| Blit::new(device));
         let entry = self.entries.get_mut(&id).expect("just inserted");
-        let at = entry.imports.iter().position(|(buffer_id, _)| *buffer_id == buffer.id);
+        let at = entry
+            .imports
+            .iter()
+            .position(|(buffer_id, _)| *buffer_id == buffer.id);
         let group = match at {
             Some(at) => {
                 let import = entry.imports.remove(at);
