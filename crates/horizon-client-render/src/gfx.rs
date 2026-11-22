@@ -8563,6 +8563,7 @@ impl Renderer {
         // Live textures, once for the HUD and the world: only what changed since last frame.
         self.live_textures.sync(
             &self.device,
+            &self.queue,
             &mut self.uploads,
             &mut encoder,
             frame

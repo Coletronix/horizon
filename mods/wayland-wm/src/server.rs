@@ -1,13 +1,22 @@
 //! The Wayland server, on its own thread: smithay's protocol state, a calloop event loop, and the
 //! bridge to the game (commands in, window snapshots out).
 //!
-//! No renderer: each surface's committed buffer is copied (wl_shm) into that surface's
-//! [`LiveTexture`], only its damaged regions, and the game's renderer draws the texture.
+//! No renderer of its own: each surface's committed buffer goes into that surface's
+//! [`LiveTexture`], and the game's renderer draws the texture. A wl_shm buffer is copied, only its
+//! damaged regions, and given back at once. A dmabuf (a GPU client's buffer, advertised with the
+//! formats the game's GPU imports) is handed to the renderer as it is: the commit waits for the
+//! client's GPU work on it (implicit sync), and the buffer is given back once the renderer's GPU
+//! has copied it.
 #![allow(unsafe_code)]
 
 use crate::{Input, Layer, LivePixelFormat, LiveRegion, LiveTexture, Window, WindowId};
 use smithay::{
-    delegate_compositor, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell,
+    backend::allocator::{
+        Buffer, Format, Fourcc, Modifier,
+        dmabuf::{Dmabuf, WeakDmabuf},
+    },
+    delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm,
+    delegate_xdg_shell,
     desktop::{PopupKind, PopupManager, WindowSurfaceType},
     input::{
         Seat, SeatHandler, SeatState,
@@ -19,13 +28,13 @@ use smithay::{
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::{
-            EventLoop, Interest, LoopSignal, Mode, PostAction,
+            EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
             channel::{Channel, Event as ChannelEvent, Sender, channel},
             generic::Generic,
         },
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
-            Client, Display, DisplayHandle,
+            Client, Display, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_shm, wl_surface::WlSurface},
         },
@@ -35,8 +44,12 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{
             BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, Damage,
-            SurfaceAttributes, TraversalAction, get_parent, is_sync_subsurface, with_states,
-            with_surface_tree_downward,
+            SurfaceAttributes, TraversalAction, add_blocker, add_pre_commit_hook, get_parent,
+            is_sync_subsurface, with_states, with_surface_tree_downward,
+        },
+        dmabuf::{
+            DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
+            get_dmabuf,
         },
         output::{OutputHandler, OutputManagerState},
         shell::xdg::{
@@ -119,6 +132,12 @@ pub(crate) struct State {
     popups: PopupManager,
     toplevels: Vec<Toplevel>,
     next_id: u64,
+    dmabuf: DmabufState,
+    _dmabuf_global: Option<DmabufGlobal>,
+    /// Each live client dmabuf's id for the renderer's import cache: stable while it lives.
+    dmabuf_ids: Vec<(WeakDmabuf, u64)>,
+    next_dmabuf: u64,
+    handle: LoopHandle<'static, State>,
     focused: Option<WindowId>,
     /// The window the pointer is over, and where in it (its root surface's space).
     pointer_window: Option<(WindowId, Point<f64, Logical>)>,
@@ -131,6 +150,9 @@ pub(crate) struct State {
 /// Per-surface data: the texture its buffers go into.
 struct SurfaceTexture {
     texture: LiveTexture,
+    /// A dmabuf the renderer reads, with the generation it was given at: given back once the
+    /// renderer has consumed that generation, or when a newer buffer replaces it.
+    held: Option<(WlBuffer, u64)>,
     /// The surface's size in logical pixels, from its last buffer.
     size: [i32; 2],
     /// Whether the surface has a buffer now.
@@ -189,6 +211,34 @@ fn run(
     );
     output.set_preferred(mode);
 
+    // GPU clients' buffers, in the layouts the game's GPU imports. Without them (no Vulkan
+    // import), clients fall back to wl_shm.
+    let mut dmabuf = DmabufState::new();
+    let dmabuf_global = horizon_live_texture_caps().and_then(|caps| {
+        let formats: Vec<Format> = caps
+            .formats
+            .iter()
+            .filter_map(|f| {
+                Some(Format {
+                    code: Fourcc::try_from(f.fourcc).ok()?,
+                    modifier: Modifier::from(f.modifier),
+                })
+            })
+            .collect();
+        let feedback = DmabufFeedbackBuilder::new(caps.device as _, formats)
+            .build()
+            .map_err(|e| log::warn!("wayland_wm: no dmabuf feedback: {e}"))
+            .ok()?;
+        log::info!(
+            "wayland_wm: offering dmabufs in {} formats",
+            caps.formats.len()
+        );
+        Some(dmabuf.create_global_with_default_feedback::<State>(&dh, &feedback))
+    });
+    if dmabuf_global.is_none() {
+        log::info!("wayland_wm: the game's GPU imports no dmabufs; clients draw to shared memory");
+    }
+
     let socket = ListeningSocketSource::new_auto().map_err(|e| e.to_string())?;
     let socket_name = socket.socket_name().to_string_lossy().into_owned();
     let handle = event_loop.handle();
@@ -236,6 +286,11 @@ fn run(
         popups: PopupManager::default(),
         toplevels: Vec::new(),
         next_id: 1,
+        dmabuf,
+        _dmabuf_global: dmabuf_global,
+        dmabuf_ids: Vec::new(),
+        next_dmabuf: 0,
+        handle: event_loop.handle(),
         focused: None,
         pointer_window: None,
         dirty: false,
@@ -428,9 +483,47 @@ impl State {
         self.dirty = true;
     }
 
+    /// The renderer's id for `dmabuf`, the same each time it comes back.
+    fn dmabuf_id(&mut self, dmabuf: &Dmabuf) -> u64 {
+        self.dmabuf_ids.retain(|(weak, _)| !weak.is_gone());
+        if let Some((_, id)) = self
+            .dmabuf_ids
+            .iter()
+            .find(|(weak, _)| weak.upgrade().as_ref() == Some(dmabuf))
+        {
+            return *id;
+        }
+        self.next_dmabuf += 1;
+        self.dmabuf_ids.push((dmabuf.weak(), self.next_dmabuf));
+        self.next_dmabuf
+    }
+
     /// Copy the buffers committed anywhere in `root`'s tree into their textures.
     fn import_tree(&mut self, root: &WlSurface) {
         let mut changed = false;
+        // Ids first: the traversal can't borrow the state.
+        let mut ids = Vec::new();
+        with_surface_tree_downward(
+            root,
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |_, states, _| {
+                let mut cached = states.cached_state.get::<SurfaceAttributes>();
+                if let Some(BufferAssignment::NewBuffer(buffer)) = &cached.current().buffer
+                    && let Ok(dmabuf) = get_dmabuf(buffer)
+                {
+                    ids.push(dmabuf.clone());
+                }
+            },
+            |_, _, _| true,
+        );
+        let ids: Vec<(Dmabuf, u64)> = ids
+            .into_iter()
+            .map(|dmabuf| {
+                let id = self.dmabuf_id(&dmabuf);
+                (dmabuf, id)
+            })
+            .collect();
         with_surface_tree_downward(
             root,
             (),
@@ -447,6 +540,7 @@ impl State {
                     .data_map
                     .get_or_insert_threadsafe(|| Mutex::new(SurfaceTexture {
                         texture: LiveTexture::new(0, 0),
+                        held: None,
                         size: [0, 0],
                         mapped: false,
                     }));
@@ -455,6 +549,34 @@ impl State {
                     BufferAssignment::Removed => {
                         changed |= texture.mapped;
                         texture.mapped = false;
+                        if let Some((held, _)) = texture.held.take() {
+                            held.release();
+                        }
+                    }
+                    BufferAssignment::NewBuffer(buffer) if get_dmabuf(&buffer).is_ok() => {
+                        let dmabuf = get_dmabuf(&buffer).expect("checked").clone();
+                        let id = ids
+                            .iter()
+                            .find(|(d, _)| *d == dmabuf)
+                            .map_or(0, |(_, id)| *id);
+                        match give_dmabuf(&texture.texture, &dmabuf, id) {
+                            Some(generation) => {
+                                let size = [
+                                    dmabuf.width() as i32 / scale,
+                                    dmabuf.height() as i32 / scale,
+                                ];
+                                changed |= !texture.mapped || texture.size != size;
+                                texture.size = size;
+                                texture.mapped = true;
+                                // The one it replaces won't be read again.
+                                if let Some((old, _)) = texture.held.replace((buffer, generation))
+                                    && texture.held.as_ref().is_none_or(|(b, _)| *b != old)
+                                {
+                                    old.release();
+                                }
+                            }
+                            None => buffer.release(),
+                        }
                     }
                     BufferAssignment::NewBuffer(buffer) => {
                         if let Some([width, height]) = import(&buffer, &texture.texture, &damage, scale)
@@ -609,6 +731,36 @@ fn import(buffer: &WlBuffer, texture: &LiveTexture, damage: &[Damage], scale: i3
     .flatten()
 }
 
+/// Hand `dmabuf` to `texture`'s renderer as buffer `id`; the generation it was given at, or `None`
+/// for a layout the renderer can't read.
+fn give_dmabuf(texture: &LiveTexture, dmabuf: &Dmabuf, id: u64) -> Option<u64> {
+    if dmabuf.num_planes() != 1 {
+        return None;
+    }
+    let format = dmabuf.format();
+    let planes = dmabuf
+        .handles()
+        .zip(dmabuf.offsets())
+        .zip(dmabuf.strides())
+        .map(|((fd, offset), stride)| {
+            Some(mod_api::LiveDmabufPlane {
+                fd: fd.try_clone_to_owned().ok()?,
+                offset,
+                stride,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(texture.set_dmabuf(mod_api::LiveDmabuf {
+        id,
+        width: dmabuf.width(),
+        height: dmabuf.height(),
+        fourcc: format.code as u32,
+        modifier: u64::from(format.modifier),
+        planes,
+        y_inverted: dmabuf.y_inverted(),
+    }))
+}
+
 fn send_frames(surface: &WlSurface, time: u32) {
     with_surface_tree_downward(
         surface,
@@ -623,6 +775,18 @@ fn send_frames(surface: &WlSurface, time: u32) {
                 .drain(..)
             {
                 callback.done(time);
+            }
+            // A dmabuf the renderer's GPU has copied goes back to the client.
+            if let Some(texture) = states.data_map.get::<Mutex<SurfaceTexture>>() {
+                let mut texture = texture.lock().unwrap_or_else(|p| p.into_inner());
+                if texture
+                    .held
+                    .as_ref()
+                    .is_some_and(|(_, generation)| texture.texture.consumed() >= *generation)
+                    && let Some((buffer, _)) = texture.held.take()
+                {
+                    buffer.release();
+                }
             }
         },
         |_, _, _| true,
@@ -639,6 +803,34 @@ impl CompositorHandler for State {
             .get_data::<ClientState>()
             .expect("every client is inserted with ClientState")
             .compositor
+    }
+
+    fn new_surface(&mut self, surface: &WlSurface) {
+        // A dmabuf's commit waits until the client's GPU has finished drawing it.
+        add_pre_commit_hook::<Self, _>(surface, |state, _display, surface| {
+            let dmabuf = with_states(surface, |states| {
+                let mut cached = states.cached_state.get::<SurfaceAttributes>();
+                match cached.pending().buffer.as_ref() {
+                    Some(BufferAssignment::NewBuffer(buffer)) => get_dmabuf(buffer).ok().cloned(),
+                    _ => None,
+                }
+            });
+            let Some(dmabuf) = dmabuf else { return };
+            let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) else {
+                return;
+            };
+            let Some(client) = surface.client() else { return };
+            let inserted = state.handle.insert_source(source, move |_, _, state| {
+                let display = state.display.clone();
+                state
+                    .client_compositor_state(&client)
+                    .blocker_cleared(state, &display);
+                Ok(())
+            });
+            if inserted.is_ok() {
+                add_blocker(surface, blocker);
+            }
+        });
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -766,8 +958,25 @@ impl SeatHandler for State {
 
 impl OutputHandler for State {}
 
+impl DmabufHandler for State {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf
+    }
+
+    fn dmabuf_imported(&mut self, _global: &DmabufGlobal, _dmabuf: Dmabuf, notifier: ImportNotifier) {
+        // Only layouts the renderer imports are offered; a buffer it still can't read keeps the
+        // window's last picture (the renderer logs why).
+        let _ = notifier.successful::<State>();
+    }
+}
+
 delegate_compositor!(State);
 delegate_shm!(State);
 delegate_xdg_shell!(State);
 delegate_seat!(State);
 delegate_output!(State);
+delegate_dmabuf!(State);
+
+fn horizon_live_texture_caps() -> Option<mod_api::LiveDmabufCaps> {
+    mod_api::live_dmabuf_caps()
+}

@@ -156,6 +156,7 @@ pub(super) async fn open_adapter(
         | oit::features(adapter)
         | super::rt::query::features(adapter, needs.rays)
         | mesh_shader::features(adapter)
+        | horizon_dmabuf::features(adapter)
         | (adapter.features()
             & (wgpu::Features::INDIRECT_FIRST_INSTANCE
                 | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
@@ -206,6 +207,16 @@ pub(super) async fn open_adapter(
         Ok(opened) => opened,
         Err(e) => return Err(AdapterFailure::Failed(format!("{name} device: {e}"))),
     };
+    // What dmabufs this device imports, for live texture producers (a mod's Wayland
+    // compositor) to offer their clients.
+    let dmabuf = horizon_dmabuf::caps(&device);
+    startup_step(format_args!(
+        "dmabuf import: {}",
+        dmabuf
+            .as_ref()
+            .map_or("none".to_string(), |caps| format!("{} formats", caps.formats.len()))
+    ));
+    horizon_live_texture::set_dmabuf_caps(dmabuf);
     let device_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let lost = device_lost.clone();
     device.set_device_lost_callback(move |reason, message| {

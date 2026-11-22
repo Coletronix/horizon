@@ -4,6 +4,7 @@
 
 // no wire: a process-local handle shared with the renderer; native mods only.
 pub use horizon_live_texture::{
-    Dmabuf as LiveDmabuf, DmabufPlane as LiveDmabufPlane, LiveTexture, PixelFormat as LivePixelFormat,
-    Region as LiveRegion,
+    Dmabuf as LiveDmabuf, DmabufCaps as LiveDmabufCaps, DmabufFormat as LiveDmabufFormat,
+    DmabufPlane as LiveDmabufPlane, LiveTexture, PixelFormat as LivePixelFormat,
+    Region as LiveRegion, dmabuf_caps as live_dmabuf_caps, fourcc as live_fourcc,
 };

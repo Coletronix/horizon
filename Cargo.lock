@@ -2064,6 +2064,7 @@ dependencies = [
  "horizon-client-input",
  "horizon-command",
  "horizon-core",
+ "horizon-dmabuf",
  "horizon-engine-slots",
  "horizon-guest-stack",
  "horizon-hdr",

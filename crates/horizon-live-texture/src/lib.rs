@@ -356,9 +356,10 @@ impl LiveTexture {
         true
     }
 
-    /// Make `buffer` the texture's source, imported by the renderer without a copy. The texture
-    /// takes the buffer's size.
-    pub fn set_dmabuf(&self, buffer: Dmabuf) {
+    /// Make `buffer` the texture's source, imported by the renderer without a CPU copy. The
+    /// texture takes the buffer's size. Returns the generation it is: once [`Self::consumed`]
+    /// reaches it, the renderer has finished reading the buffer.
+    pub fn set_dmabuf(&self, buffer: Dmabuf) -> u64 {
         let mut state = self.lock();
         state.width = buffer.width;
         state.height = buffer.height;
@@ -367,6 +368,7 @@ impl LiveTexture {
         state.resized_at = generation;
         state.log.clear();
         state.log_since = generation;
+        generation
     }
 
     /// The last generation whose source the GPU has finished reading: a producer may reuse a
