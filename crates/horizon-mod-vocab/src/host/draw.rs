@@ -486,6 +486,23 @@ pub trait WorldDrawContext {
     ) -> Result<(), PipelineDrawError> {
         unimplemented!("WorldDrawContext::pipeline_quads")
     }
+    /// Submit world quads showing live texture `texture` (a Wayland window's surface, a video),
+    /// atomically: each quad samples it, filtered, at its corners' texture coordinates (0 to 1
+    /// across the texture) and multiplies it by its colour (ARGB). `depth` says whether nearer
+    /// world surfaces hide them. They count against the same per-view capacity as
+    /// [`quads`](Self::quads) and draw, within a stage, after its plain quads and lines, in the
+    /// order submitted. The texture is uploaded as it changes, only the regions its writer
+    /// damaged. On `Err`, nothing from this call is drawn.
+    /// Not on wasm: the texture is a process-local handle the renderer shares with its writer.
+    fn live_quads(
+        &mut self,
+        texture: &LiveTexture,
+        quads: &[PipelineQuad],
+        depth: WorldDepth,
+    ) -> Result<(), PipelineDrawError> {
+        let _ = (texture, quads, depth);
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Unknown))
+    }
     /// Queued counts and fixed capacities, shared by both depth modes and all listeners.
     /// Capacity is allocated during setup, never grown during submission.
     fn usage(&self) -> WorldDrawUsage {

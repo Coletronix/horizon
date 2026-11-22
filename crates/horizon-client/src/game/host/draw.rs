@@ -337,6 +337,14 @@ impl WorldDrawContext for GameWorldDrawContext<'_, '_> {
         self.game
             .native_world_draw_pipeline_quads(&mut *self.surface, pipeline, quads)
     }
+    fn live_quads(
+        &mut self,
+        texture: &LiveTexture,
+        quads: &[PipelineQuad],
+        depth: WorldDepth,
+    ) -> Result<(), PipelineDrawError> {
+        self.surface.live_quads(texture, quads, depth)
+    }
     fn usage(&self) -> WorldDrawUsage {
         self.game.native_world_draw_usage(&*self.surface)
     }

@@ -43,6 +43,8 @@ pub struct WorldGeometry {
     /// a stage. They count against the quad capacity.
     pipeline_quads: Vec<PipelineVertex>,
     pipeline_runs: Vec<PipelineRun>,
+    /// The live textures live runs draw ([`PipelineRun::texture`] indexes it).
+    live: Vec<horizon_live_texture::LiveTexture>,
     /// `PipelineFrame.time` for this view.
     time: f32,
     copies: Vec<ModelCopy>,
@@ -64,6 +66,7 @@ impl Default for WorldGeometry {
             quads: std::array::from_fn(|_| Vec::with_capacity(CAPACITY as usize * 4)),
             pipeline_quads: Vec::with_capacity(CAPACITY as usize * 4),
             pipeline_runs: Vec::with_capacity(CAPACITY as usize),
+            live: Vec::new(),
             time: 0.0,
             copies: Vec::with_capacity(INSTANCE_CAPACITY as usize),
             groups: std::collections::HashSet::with_capacity(INSTANCE_CAPACITY as usize),
@@ -84,6 +87,7 @@ impl WorldGeometry {
         self.quads.iter_mut().for_each(Vec::clear);
         self.pipeline_quads.clear();
         self.pipeline_runs.clear();
+        self.live.clear();
         self.clear_copies();
         self.model_cut = 0;
         self.groups.clear();
@@ -286,6 +290,39 @@ impl WorldGeometry {
         slot: u32,
         quads: &[PipelineQuad],
     ) -> Result<(), PipelineDrawError> {
+        self.queue_pipeline_quads(slot, 0, quads)
+    }
+    /// Append an entire batch of quads showing `texture`, multiplied by each quad's colour, or
+    /// leave the output unchanged. They share the quad capacity with every other quad.
+    pub fn live_quads(
+        &mut self,
+        texture: &horizon_live_texture::LiveTexture,
+        quads: &[PipelineQuad],
+        depth: WorldDepth,
+    ) -> Result<(), PipelineDrawError> {
+        let known = self.live.iter().position(|t| t == texture);
+        let index = known.unwrap_or_else(|| {
+            self.live.push(texture.clone());
+            self.live.len() - 1
+        });
+        let slot = if depth == WorldDepth::ThroughWalls {
+            mod_pipelines::LIVE_THROUGH
+        } else {
+            mod_pipelines::LIVE_TESTED
+        };
+        let result = self.queue_pipeline_quads(slot, index as u32, quads);
+        // A refused batch queues nothing, so a texture it added has no run.
+        if result.is_err() && known.is_none() {
+            self.live.pop();
+        }
+        result
+    }
+    fn queue_pipeline_quads(
+        &mut self,
+        slot: u32,
+        texture: u32,
+        quads: &[PipelineQuad],
+    ) -> Result<(), PipelineDrawError> {
         if quads.len() > (CAPACITY - self.usage().quads) as usize {
             return Err(PipelineDrawError::CapacityExceeded);
         }
@@ -313,9 +350,12 @@ impl WorldGeometry {
         }
         let (stage, count) = (self.stage as u32, quads.len() as u32);
         match self.pipeline_runs.last_mut() {
-            Some(run) if run.slot == slot && run.stage == stage => run.quads += count,
+            Some(run) if run.slot == slot && run.texture == texture && run.stage == stage => {
+                run.quads += count
+            }
             _ => self.pipeline_runs.push(PipelineRun {
                 slot,
+                texture,
                 stage,
                 quads: count,
             }),
@@ -336,6 +376,7 @@ impl WorldGeometry {
                 vertices: &self.pipeline_quads,
                 runs: &self.pipeline_runs,
                 time: self.time,
+                live: &self.live,
             },
         }
     }
@@ -578,7 +619,7 @@ mod tests {
         draw.pipeline_quads(4, &[]).unwrap();
 
         let pipelines = draw.batch().pipelines;
-        let run = |slot, stage, quads| PipelineRun { slot, stage, quads };
+        let run = |slot, stage, quads| PipelineRun { slot, texture: 0, stage, quads };
         assert_eq!(
             pipelines.runs,
             [run(4, 0, 3), run(1, 0, 1), run(4, 0, 1), run(4, 3, 1)]

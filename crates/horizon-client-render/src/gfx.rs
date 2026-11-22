@@ -503,6 +503,7 @@ mod lod;
 mod looks;
 #[cfg(any(test, feature = "test-support"))]
 pub use looks::PartLooks;
+pub mod live_textures;
 pub mod mod_pipelines;
 pub mod native_entity;
 mod native_executor;
@@ -1533,6 +1534,8 @@ pub struct Renderer {
     see_through_pipeline: wgpu::RenderPipeline,
     /// Native mods' world primitives (`Frame::world_primitives`).
     world_primitives: world_primitives::WorldPrimitives,
+    /// Live textures (mods' Wayland windows, videos) the HUD and the world draw this frame.
+    live_textures: live_textures::LiveTextures,
     text_polygon_offset_pipeline: wgpu::RenderPipeline,
     world_text_pipeline: wgpu::RenderPipeline,
     fluid_pipeline: wgpu::RenderPipeline,
@@ -4464,6 +4467,7 @@ impl Renderer {
             lightning: lightning::Renderer::new(),
             see_through_pipeline,
             world_primitives,
+            live_textures: Default::default(),
             text_polygon_offset_pipeline,
             world_text_pipeline,
             fluid_pipeline,
@@ -8556,6 +8560,17 @@ impl Renderer {
             frame.weather,
             frame.weather_time,
         );
+        // Live textures, once for the HUD and the world: only what changed since last frame.
+        self.live_textures.sync(
+            &self.device,
+            &mut self.uploads,
+            &mut encoder,
+            frame
+                .hud
+                .live
+                .iter()
+                .chain(frame.world_primitives.pipelines.live),
+        );
         // Native mods' world primitives, drawn as the world is: its jittered projection, the
         // line widths in the frame's pixels as the gizmo lines'.
         let world_primitives = !frame.title && {
@@ -8569,6 +8584,11 @@ impl Renderer {
                 &self.entity_atlas,
             )
         };
+        if world_primitives {
+            self.world_primitives
+                .pipelines
+                .bind_live(&self.device, &self.live_textures);
+        }
         let pack = self.pack_blocks(frame, fog, globals.fog_ends);
         self.write_core_text(&pack, views.primary(), pose, jitter, fog_color);
         let outline_edges = frame.outline.len().min(MAX_OUTLINE_EDGES as usize);
@@ -9127,6 +9147,8 @@ impl Renderer {
             frame.hud,
             [self.config.width, self.config.height],
         );
+        self.hud
+            .bind_live(&self.device, &self.live_textures, frame.hud);
         if culling && let Some(cull) = &mut self.cull {
             cull.upload(
                 &self.device,

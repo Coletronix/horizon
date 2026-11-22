@@ -2663,7 +2663,7 @@ use crate::gfx::hud_coverage::{self, Pipeline};
 
 pub struct HudRenderer {
     pictures: HashMap<u64, (Arc<pictures::Picture>, wgpu::BindGroup)>,
-    live: HashMap<u64, live::LiveGpu>,
+    live: HashMap<u64, live::LiveGroup>,
     pub sprite_animations: Vec<(Rect, crate::sprites::SpriteAnimation, (usize, usize, u32))>,
     /// The shared atlas texture, for run-time glyph uploads.
     pub atlas_texture: Option<wgpu::Texture>,
@@ -3041,7 +3041,6 @@ impl HudRenderer {
         size: [u32; 2],
     ) {
         self.prepare_pictures(device, uploads, encoder, batch);
-        self.prepare_live(device, uploads, encoder, batch);
         self.upload_patches(uploads, encoder, &batch.patches);
         if batch.vertices.is_empty() || size.contains(&0) {
             return;

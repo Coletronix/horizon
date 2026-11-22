@@ -21,11 +21,24 @@ pub struct PipelineVertex {
     pub color: u32,
 }
 
+/// The slot of a run of live texture quads drawn depth tested ([`PipelineRun::texture`] says
+/// which texture).
+pub const LIVE_TESTED: u32 = u32::MAX;
+/// The slot of a run of live texture quads seen through walls.
+pub const LIVE_THROUGH: u32 = u32::MAX - 1;
+
+/// Whether `slot` is one of the built-in live texture pipelines'.
+pub fn is_live(slot: u32) -> bool {
+    slot >= LIVE_THROUGH
+}
+
 /// Quads that follow each other in a frame's vertices and draw with one pipeline at one stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PipelineRun {
-    /// The pipeline's slot in the frame's [`Pipelines`].
+    /// The pipeline's slot in the frame's [`Pipelines`], or [`LIVE_TESTED`] / [`LIVE_THROUGH`].
     pub slot: u32,
+    /// For a live slot, the texture's index in [`Batch::live`]; 0 otherwise.
+    pub texture: u32,
     /// The stage it draws at (`RenderLevelStage::ALL`'s index).
     pub stage: u32,
     pub quads: u32,
@@ -40,6 +53,8 @@ pub struct Batch<'a> {
     pub runs: &'a [PipelineRun],
     /// `PipelineFrame.time`.
     pub time: f32,
+    /// The live textures the live runs draw, by [`PipelineRun::texture`].
+    pub live: &'a [horizon_live_texture::LiveTexture],
 }
 
 #[repr(C)]
@@ -52,7 +67,10 @@ struct FrameUniform {
 
 /// A run as uploaded: where its quads start in the vertex buffer.
 struct Run {
+    /// A mod pipeline's slot, or for a live run 0 (tested) or 1 (through walls).
     slot: usize,
+    /// The live texture's id, for a live run.
+    live: Option<u64>,
     stage: usize,
     quads: std::ops::Range<u32>,
 }
@@ -88,6 +106,13 @@ pub struct ModPipelines {
     /// By slot; `None` for a pipeline the load refused.
     pipelines: Vec<Option<Compiled>>,
     runs: Vec<Run>,
+    /// The live texture pipelines: depth tested, then through walls.
+    live_pipelines: [wgpu::RenderPipeline; 2],
+    /// Each drawn live texture's bind group, with the cache entry version it was made from.
+    live_groups: std::collections::HashMap<u64, (wgpu::BindGroup, u64)>,
+    live_sampler: wgpu::Sampler,
+    /// Binding 2 of a live texture's group, which the live shader doesn't read.
+    live_rect: wgpu::Buffer,
 }
 
 impl ModPipelines {
@@ -174,6 +199,9 @@ impl ModPipelines {
                 },
             ],
         });
+        let live_pipelines = [WorldDepth::Tested, WorldDepth::ThroughWalls]
+            .map(|depth| live_pipeline(device, &textured_layout, color_format, depth));
+        let live_rect = buffer("Live texture rect", 16, wgpu::BufferUsages::UNIFORM);
         Self {
             color_format,
             layout,
@@ -187,6 +215,10 @@ impl ModPipelines {
             generation: 0,
             pipelines: Vec::new(),
             runs: Vec::new(),
+            live_pipelines,
+            live_groups: Default::default(),
+            live_sampler: super::live_textures::sampler(device),
+            live_rect,
         }
     }
 
@@ -403,25 +435,37 @@ impl ModPipelines {
         viewport: [u32; 2],
     ) -> u32 {
         self.runs.clear();
-        if batch
+        // Live texture runs draw with the built-in pipelines, whatever the mods' set.
+        let built = batch
             .set
-            .is_none_or(|set| set.generation() != self.generation)
-        {
-            return 0;
-        }
+            .is_some_and(|set| set.generation() == self.generation);
         let mut next = 0;
         for run in batch.runs {
             let quads = next..next + run.quads;
             next = quads.end;
             // A run past the vertices given, or of a pipeline this load has none for, has
             // nothing to draw with.
-            if quads.end as usize * 4 > batch.vertices.len()
-                || !matches!(self.pipelines.get(run.slot as usize), Some(Some(_)))
-            {
+            if quads.end as usize * 4 > batch.vertices.len() {
+                continue;
+            }
+            if is_live(run.slot) {
+                let Some(texture) = batch.live.get(run.texture as usize) else {
+                    continue;
+                };
+                self.runs.push(Run {
+                    slot: usize::from(run.slot == LIVE_THROUGH),
+                    live: Some(texture.id()),
+                    stage: run.stage as usize,
+                    quads,
+                });
+                continue;
+            }
+            if !built || !matches!(self.pipelines.get(run.slot as usize), Some(Some(_))) {
                 continue;
             }
             self.runs.push(Run {
                 slot: run.slot as usize,
+                live: None,
                 stage: run.stage as usize,
                 quads,
             });
@@ -467,6 +511,21 @@ impl ModPipelines {
             if run.stage < first || run.stage > last {
                 continue;
             }
+            if let Some(id) = run.live {
+                let Some((group, _)) = self.live_groups.get(&id) else {
+                    continue;
+                };
+                if !bound {
+                    bound = true;
+                    pass.set_bind_group(0, &self.group, &[]);
+                    pass.set_vertex_buffer(0, self.vertices.slice(..));
+                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                }
+                pass.set_pipeline(&self.live_pipelines[run.slot]);
+                pass.set_bind_group(1, group, &[]);
+                pass.draw_indexed(run.quads.start * 6..run.quads.end * 6, 0, 0..1);
+                continue;
+            }
             let Some(Some((pipeline, texture))) = self.pipelines.get(run.slot) else {
                 continue;
             };
@@ -484,6 +543,103 @@ impl ModPipelines {
             pass.draw_indexed(run.quads.start * 6..run.quads.end * 6, 0, 0..1);
         }
     }
+}
+
+impl ModPipelines {
+    /// Bind the live textures the prepared runs draw, as the renderer's cache holds them this
+    /// frame (synced before this), and forget the others. A texture the cache lacks draws nothing.
+    pub fn bind_live(&mut self, device: &wgpu::Device, cache: &super::live_textures::LiveTextures) {
+        let drawn: Vec<u64> = self.runs.iter().filter_map(|r| r.live).collect();
+        self.live_groups.retain(|id, _| drawn.contains(id));
+        for id in drawn {
+            let Some(entry) = cache.get(id) else {
+                self.live_groups.remove(&id);
+                continue;
+            };
+            if self
+                .live_groups
+                .get(&id)
+                .is_some_and(|(_, version)| *version == entry.version)
+            {
+                continue;
+            }
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Live texture"),
+                layout: &self.texture_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&entry.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.live_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.live_rect.as_entire_binding(),
+                    },
+                ],
+            });
+            self.live_groups.insert(id, (group, entry.version));
+        }
+    }
+}
+
+/// The built-in pipeline drawing live texture quads at `depth`.
+fn live_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    depth: WorldDepth,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Live texture"),
+        source: wgpu::ShaderSource::Wgsl(crate::mod_pipelines::live_shader().into()),
+    });
+    let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Unorm8x4];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Live texture"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some(VERTEX_ENTRY),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<PipelineVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &attributes,
+            })],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(match depth {
+                WorldDepth::ThroughWalls => wgpu::CompareFunction::Always,
+                _ => wgpu::CompareFunction::GreaterEqual,
+            }),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some(FRAGMENT_ENTRY),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 fn gpu_refusal(built: &Built, error: &str) -> String {
@@ -876,13 +1032,14 @@ mod tests {
             quad([32.0, 32.0, 64.0, 64.0], 2.0, white),
         ]
         .concat();
-        let run = |slot, stage, quads| PipelineRun { slot, stage, quads };
+        let run = |slot, stage, quads| PipelineRun { slot, texture: 0, stage, quads };
         let runs = [run(0, 0, 2), run(1, 2, 1), run(3, 0, 1), run(4, 0, 1)];
         let batch = Batch {
             set: Some(&set),
             vertices: &vertices,
             runs: &runs,
             time: 1.0,
+            live: &[],
         };
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut primitives = WorldPrimitives::new(&gpu.0, (format, false));
@@ -957,6 +1114,7 @@ mod tests {
         let vertices = quad([0.0, 0.0, 64.0, 64.0], 2.0, [255; 4]);
         let runs = [PipelineRun {
             slot: 0,
+            texture: 0,
             stage: 4,
             quads: 1,
         }];
@@ -968,6 +1126,7 @@ mod tests {
                 vertices: &vertices,
                 runs: &runs,
                 time: 0.0,
+                live: &[],
             };
             render(&gpu, &mut primitives, format, batch, STAGES - 1)(32, 32)
         };
@@ -1091,6 +1250,7 @@ mod tests {
         }
         let runs = [0, 1, 3].map(|slot| PipelineRun {
             slot,
+            texture: 0,
             stage: 4,
             quads: 1,
         });
@@ -1103,6 +1263,7 @@ mod tests {
                 vertices: &vertices,
                 runs: &runs,
                 time: 0.0,
+                live: &[],
             },
             STAGES - 1,
         );
