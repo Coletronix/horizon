@@ -22,6 +22,8 @@ struct StoredWindow {
     pixel: f64,
     size: [i32; 2],
     pocketed: bool,
+    #[serde(default)]
+    world: String,
 }
 
 fn path() -> Option<PathBuf> {
@@ -43,6 +45,7 @@ pub fn save(state: &State) {
                 pixel: p.pixel,
                 size: p.size,
                 pocketed: p.pocketed,
+                world: p.world.clone(),
             })
             .collect(),
         pocket: state.pocket.iter().map(|w| w.0).collect(),
@@ -78,6 +81,7 @@ pub fn load(instance: u64) -> Option<State> {
                 pixel: w.pixel,
                 size: w.size,
                 pocketed: w.pocketed,
+                world: w.world,
                 anchor: Edges {
                     top: true,
                     ..Edges::default()

@@ -64,6 +64,8 @@ struct Placed {
     size: [i32; 2],
     /// Put away: not in the world, its program suspended.
     pocketed: bool,
+    /// The world (save or server, and dimension) it stands in: in another, it waits put away.
+    world: String,
     /// Which edges stay put when its size changes (the ones opposite those last dragged).
     anchor: Edges,
 }
@@ -145,6 +147,10 @@ struct State {
     dirty_since: Option<Instant>,
     /// The release key went down and took the keyboard back: its repeats and release are ours.
     release_held: bool,
+    /// The world the player is in: its save folder or server, and its dimension.
+    world: String,
+    /// The dimension, from the last level load.
+    dimension: String,
     /// Since when the player has been playing (no screen over the world).
     playing_since: Option<Instant>,
     /// The player has been playing a moment: new windows can be placed in front of them.
@@ -152,6 +158,11 @@ struct State {
 }
 
 impl State {
+    /// Whether `placed` stands in the world the player is in now.
+    fn here(&self, placed: &Placed) -> bool {
+        !placed.pocketed && placed.world == self.world
+    }
+
     fn placed(&self, id: WindowId) -> Option<&Placed> {
         self.placed.iter().find(|p| p.window == id)
     }
@@ -293,6 +304,7 @@ impl WmWorld {
                         pixel: 1.0 / space::PIXELS_PER_BLOCK,
                         size,
                         pocketed: false,
+                        world: state.world.clone(),
                         anchor: Edges {
                             top: true,
                             ..Edges::default()
@@ -347,7 +359,7 @@ impl WmWorld {
         let right = pose.basis().right;
         let start = pose.centre;
         for step in 0..12 {
-            let overlaps = state.placed.iter().filter(|p| !p.pocketed).any(|p| {
+            let overlaps = state.placed.iter().filter(|p| state.here(p)).any(|p| {
                 let d = space::sub(p.pose.centre, pose.centre);
                 let reach = (w + f64::from(p.size[0]) * p.pixel) / 2.0 + space::BEZEL * 2.0;
                 space::dot(d, d).sqrt() < reach.max(0.5)
@@ -372,6 +384,7 @@ impl WmWorld {
         // The camera's position is the eye's.
         let eye = camera.position;
         let dir = space::forward(camera.yaw, camera.pitch);
+        self.enter_world(&mut state, wm, host);
         let playing = host.playing();
         if !playing {
             state.playing_since = None;
@@ -408,6 +421,36 @@ impl WmWorld {
             state.dirty_since = None;
             store::save(&state);
         }
+    }
+
+    /// The world the player is in, and on a change, which windows are seen: the ones standing
+    /// in another world are suspended until the player is there again (or recalls them).
+    fn enter_world(&self, state: &mut State, wm: &Wm, host: &mut dyn ClientHost) {
+        let server = host.client_session().client_server();
+        let place = server
+            .and_then(|s| {
+                s.save_folder
+                    .map(|f| format!("save:{f}"))
+                    .or(s.address.map(|a| format!("server:{a}")))
+            })
+            .unwrap_or_default();
+        let world = format!("{place}|{}", state.dimension);
+        if world == state.world {
+            return;
+        }
+        state.world = world;
+        // Windows that never had a world take this one.
+        let current = state.world.clone();
+        for placed in state.placed.iter_mut().filter(|p| p.world.is_empty()) {
+            placed.world = current.clone();
+        }
+        for placed in &state.placed {
+            wm.send(Input::Visible {
+                window: placed.window,
+                visible: state.here(placed),
+            });
+        }
+        state.changed();
     }
 
     /// The pointer follows the crosshair over screens.
@@ -531,7 +574,7 @@ impl WmWorld {
             ]
         };
         let shown: Vec<usize> = (0..state.placed.len())
-            .filter(|&i| !state.placed[i].pocketed)
+            .filter(|&i| state.here(&state.placed[i]))
             .collect();
         let mut moved = false;
         for (n, &i) in shown.iter().enumerate() {
@@ -641,12 +684,22 @@ impl WmWorld {
     /// The last window put away comes back, in front of the player. With none put away, the
     /// farthest window does: a window lost behind a wall or far away is never out of reach.
     fn recall(&self, state: &mut State, wm: &Wm, windows: &[Window]) {
-        let farthest = || {
-            let (eye, ..) = state.eye?;
+        let in_pocket = state
+            .pocket
+            .iter()
+            .rposition(|w| !state.itemised.contains(w))
+            .map(|i| state.pocket[i]);
+        // Then a window standing in another world.
+        let elsewhere = state
+            .placed
+            .iter()
+            .find(|p| !p.pocketed && p.world != state.world)
+            .map(|p| p.window);
+        let farthest = state.eye.and_then(|(eye, ..)| {
             state
                 .placed
                 .iter()
-                .filter(|p| !p.pocketed)
+                .filter(|p| state.here(p))
                 .max_by(|a, b| {
                     let d = |p: &Placed| {
                         let v = space::sub(p.pose.centre, eye);
@@ -655,25 +708,20 @@ impl WmWorld {
                     d(a).total_cmp(&d(b))
                 })
                 .map(|p| p.window)
-        };
-        let in_pocket = state
-            .pocket
-            .iter()
-            .rposition(|w| !state.itemised.contains(w))
-            .map(|i| state.pocket[i]);
-        if let Some(w) = in_pocket {
-            state.pocket.retain(|p| *p != w);
-        }
-        let Some(window) = in_pocket.or_else(farthest) else {
+        });
+        let Some(window) = in_pocket.or(elsewhere).or(farthest) else {
             return;
         };
+        state.pocket.retain(|p| *p != window);
         let pose = windows
             .iter()
             .find(|w| w.id == window)
             .map(|w| self.place_new(state, w));
+        let world = state.world.clone();
         if let (Some(pose), Some(placed)) = (pose, state.placed_mut(window)) {
             placed.pose = pose;
             placed.pocketed = false;
+            placed.world = world;
         }
         wm.send(Input::Visible {
             window,
@@ -749,9 +797,11 @@ impl WmWorld {
                     .iter()
                     .find(|w| w.id == window)
                     .map(|w| self.place_new(&state, w));
+                let world = state.world.clone();
                 if let (Some(pose), Some(placed)) = (pose, state.placed_mut(window)) {
                     placed.pose = pose;
                     placed.pocketed = false;
+                    placed.world = world;
                 }
                 wm.send(Input::Visible {
                     window,
@@ -910,7 +960,7 @@ impl WmWorld {
 /// The nearest window part along the view, if no block is nearer.
 fn gaze(state: &State, windows: &[Window], eye: V3, dir: V3, block: Option<f64>) -> Option<Gaze> {
     let mut best: Option<Gaze> = None;
-    for placed in state.placed.iter().filter(|p| !p.pocketed) {
+    for placed in state.placed.iter().filter(|p| state.here(p)) {
         // A carried window is under the crosshair by construction: look through it.
         if state.carry.is_some_and(|c| c.window == placed.window) {
             continue;
@@ -1113,6 +1163,14 @@ impl Hooks for Hooked {
         }
         *event.cancellation_result = mod_api::InteractionResult::Success;
         Flow::Cancel
+    }
+
+    fn client_level_load(
+        &self,
+        _host: &mut dyn ClientHost,
+        event: &mut mod_api::ClientLevelLoadEvent<'_>,
+    ) {
+        this().lock().dimension = event.dimension.to_string();
     }
 
     fn build_creative_mode_tab_contents(

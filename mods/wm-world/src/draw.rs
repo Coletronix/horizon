@@ -48,7 +48,7 @@ pub fn world(state: &State, windows: &[Window], event: &mut RenderLevelStageEven
     let mut shown: Vec<(&Placed, &Window)> = state
         .placed
         .iter()
-        .filter(|p| !p.pocketed)
+        .filter(|p| state.here(p))
         .filter_map(|p| {
             windows
                 .iter()
