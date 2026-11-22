@@ -385,7 +385,14 @@ pub fn hud(host: &dyn ClientHost, state: &State, windows: &[Window], draw: &mut 
         row = hint(
             host,
             draw,
-            Text::translate("wm_world.hud.frame", vec![]),
+            Text::translate(
+                if state.placed(gaze.window).is_some_and(|p| p.waxed) {
+                    "wm_world.hud.waxed"
+                } else {
+                    "wm_world.hud.frame"
+                },
+                vec![],
+            ),
             row,
         );
     }

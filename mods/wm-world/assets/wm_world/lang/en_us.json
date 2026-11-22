@@ -12,5 +12,6 @@
   "item.wm_world.window": "Window",
   "item.wm_world.app": "App",
   "wm_world.setting.curved_rows": "Curved rows",
-  "wm_world.setting.curved_rows.tooltip": "A window set down beside another turns a little towards you, so a row of windows curves around where you stand"
+  "wm_world.setting.curved_rows.tooltip": "A window set down beside another turns a little towards you, so a row of windows curves around where you stand",
+  "wm_world.hud.waxed": "Waxed: it stays put · an axe scrapes the wax off · hold attack: put away"
 }
