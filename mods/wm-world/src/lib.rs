@@ -70,6 +70,8 @@ struct Placed {
     pocketed: bool,
     /// The world (save or server, and dimension) it stands in: in another, it waits put away.
     world: String,
+    /// Waxed with honeycomb: it can't be carried, resized or pushed until an axe scrapes it.
+    waxed: bool,
     /// Which edges stay put when its size changes (the ones opposite those last dragged).
     anchor: Edges,
 }
@@ -96,13 +98,21 @@ enum Tether {
 /// The lead's item key, resolved at registration.
 static LEAD: OnceLock<mod_api::ItemKey> = OnceLock::new();
 
-/// Whether the local player holds a lead in their main hand.
-fn holding_lead(host: &dyn ClientHost) -> bool {
-    let Some(lead) = LEAD.get() else { return false };
+/// Honeycomb's and the axes' item keys, resolved at registration.
+static HONEYCOMB: OnceLock<mod_api::ItemKey> = OnceLock::new();
+static AXES: OnceLock<Vec<mod_api::ItemKey>> = OnceLock::new();
+
+/// What the local player holds in their main hand.
+fn main_hand(host: &dyn ClientHost) -> Option<mod_api::ItemKey> {
     host.camera_entity()
         .and_then(|e| host.living(e))
         .and_then(|l| l.hand_item(host, mod_api::Hand::Main))
-        .is_some_and(|stack| stack.item() == *lead)
+        .map(|stack| stack.item())
+}
+
+/// Whether the local player holds a lead in their main hand.
+fn holding_lead(host: &dyn ClientHost) -> bool {
+    main_hand(host).is_some_and(|item| LEAD.get() == Some(&item))
 }
 
 /// What the crosshair is on this frame.
@@ -332,6 +342,7 @@ impl WmWorld {
                         size,
                         pocketed: false,
                         world: state.world.clone(),
+                        waxed: false,
                         anchor: Edges {
                             top: true,
                             ..Edges::default()
@@ -629,7 +640,8 @@ impl WmWorld {
     fn separate(&self, state: &mut State) {
         const SHARE: f64 = 0.35;
         let firm = |s: &State, id: WindowId| {
-            s.carry.is_some_and(|c| c.window == id)
+            s.placed(id).is_some_and(|p| p.waxed)
+                || s.carry.is_some_and(|c| c.window == id)
                 || s.drag.is_some_and(|d| d.window == id)
                 || (s.captured && s.focus == Some(id))
         };
@@ -989,6 +1001,28 @@ impl WmWorld {
                 let Some(placed) = state.placed(gaze.window).cloned() else {
                     return Flow::Continue;
                 };
+                let held = main_hand(host);
+                if button == button::RIGHT && held.is_some() && HONEYCOMB.get() == held.as_ref() {
+                    if let Some(placed) = state.placed_mut(gaze.window) {
+                        placed.waxed = true;
+                    }
+                    state.changed();
+                    return Flow::Cancel;
+                }
+                if button == button::RIGHT
+                    && held.is_some_and(|h| AXES.get().is_some_and(|axes| axes.contains(&h)))
+                    && state.placed(gaze.window).is_some_and(|p| p.waxed)
+                {
+                    if let Some(placed) = state.placed_mut(gaze.window) {
+                        placed.waxed = false;
+                    }
+                    state.changed();
+                    return Flow::Cancel;
+                }
+                // A waxed window stays where it is: no carrying or resizing.
+                if button == button::RIGHT && state.placed(gaze.window).is_some_and(|p| p.waxed) {
+                    return Flow::Cancel;
+                }
                 if button == button::RIGHT && holding_lead(host) {
                     // A lead on the window, or off it.
                     if state.leashed.remove(&gaze.window).is_none() {
@@ -1171,6 +1205,21 @@ impl Hooks for Hooked {
         // instead of becoming items).
         items::set_key(r.item_key(items::WINDOW_ITEM));
         let _ = LEAD.set(r.item_key("minecraft:lead"));
+        let _ = HONEYCOMB.set(r.item_key("minecraft:honeycomb"));
+        let _ = AXES.set(
+            [
+                "wooden",
+                "stone",
+                "copper",
+                "iron",
+                "golden",
+                "diamond",
+                "netherite",
+            ]
+            .iter()
+            .map(|m| r.item_key(&format!("minecraft:{m}_axe")))
+            .collect(),
+        );
         let app = r.item_key(apps::APP_ITEM);
         apps::set_key(app);
         r.item_part(app, Dispensable);

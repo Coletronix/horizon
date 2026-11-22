@@ -24,6 +24,8 @@ struct StoredWindow {
     pocketed: bool,
     #[serde(default)]
     world: String,
+    #[serde(default)]
+    waxed: bool,
 }
 
 fn path() -> Option<PathBuf> {
@@ -46,6 +48,7 @@ pub fn save(state: &State) {
                 size: p.size,
                 pocketed: p.pocketed,
                 world: p.world.clone(),
+                waxed: p.waxed,
             })
             .collect(),
         pocket: state.pocket.iter().map(|w| w.0).collect(),
@@ -82,6 +85,7 @@ pub fn load(instance: u64) -> Option<State> {
                 size: w.size,
                 pocketed: w.pocketed,
                 world: w.world,
+                waxed: w.waxed,
                 anchor: Edges {
                     top: true,
                     ..Edges::default()

@@ -11,6 +11,8 @@ const BEZEL_COLOUR: u32 = 0xFF1D1D22;
 const BEZEL_HOVER: u32 = 0xFF34343C;
 const BEZEL_FOCUS: u32 = 0xFF2E5AAC;
 const BEZEL_MINED: u32 = 0xFF8C2F2A;
+/// A waxed window's bezel: honey on the dark frame.
+const BEZEL_WAXED: u32 = 0xFF6E5218;
 const SIDE_COLOUR: u32 = 0xFF17171B;
 const BACK_COLOUR: u32 = 0xFF26262C;
 const SCREEN_OFF: u32 = 0xFF050506;
@@ -85,6 +87,8 @@ fn slab(state: &State, placed: &Placed, eye: V3, event: &mut RenderLevelStageEve
     let gazed = state.gaze.filter(|g| g.window == placed.window);
     let mut bezel = if state.focus == Some(placed.window) {
         BEZEL_FOCUS
+    } else if placed.waxed {
+        BEZEL_WAXED
     } else if gazed.is_some_and(|g| !matches!(g.part, Part::Screen(_)) && g.distance <= HAND_REACH)
         || state.carry.is_some_and(|c| c.window == placed.window)
     {
