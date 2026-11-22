@@ -274,6 +274,14 @@ fn hint(host: &dyn ClientHost, draw: &mut dyn DrawContext, text: Text, row: f32)
     row
 }
 
+/// The release key's name as Controls shows it.
+fn release_key(host: &dyn ClientHost) -> Text {
+    match host.mod_key(crate::MOD_ID, "release") {
+        Some((key, _)) => Text::translate(key, vec![]),
+        None => Text::literal(""),
+    }
+}
+
 /// Whether the player wants the hints (the `hints` setting on the mod's page in Options > Mods).
 fn hints_on(host: &dyn ClientHost) -> bool {
     host.setting(crate::MOD_ID, crate::HINTS_SETTING).as_deref() != Some("false")
@@ -298,7 +306,10 @@ pub fn hud(host: &dyn ClientHost, state: &State, windows: &[Window], draw: &mut 
         row = hint(
             host,
             draw,
-            Text::translate("wm_world.hud.typing", vec![Text::literal(title(focus))]),
+            Text::translate(
+                "wm_world.hud.typing",
+                vec![Text::literal(title(focus)), release_key(host)],
+            ),
             row,
         );
     } else if state.carry.is_some() {

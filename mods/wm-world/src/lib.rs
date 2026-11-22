@@ -7,7 +7,8 @@
 //! - **Clicking a screen** gives that window the keyboard, and the click reaches it.
 //! - **Typing**: while the crosshair stays on the window with the keyboard, every key goes to it,
 //!   Escape included. Look away and the keys are the game's again; look back and they are the
-//!   window's again. Hold Escape for a second to give the keyboard back for good.
+//!   window's again. The release key (Super, rebindable) or holding Escape for a second gives the
+//!   keyboard back for good.
 //! - **The bezel** is the window as a thing: right-click it to carry the window (the wheel brings it
 //!   nearer or pushes it away, right-click again sets it down), sneak and right-click an edge or
 //!   corner and drag to resize, hold left-click to pick it up. A picked-up window is put away (its program
@@ -132,6 +133,8 @@ struct State {
     /// The view this frame: eye and direction.
     eye: Option<(V3, V3, f32, f32)>,
     dirty_since: Option<Instant>,
+    /// The release key went down and took the keyboard back: its repeats and release are ours.
+    release_held: bool,
     /// Since when the player has been playing (no screen over the world).
     playing_since: Option<Instant>,
     /// The player has been playing a moment: new windows can be placed in front of them.
@@ -419,6 +422,21 @@ impl WmWorld {
         }
     }
 
+    /// The keyboard goes back to the game until a window is clicked again: the window lets go
+    /// of every key it has down.
+    fn release_focus(&self, state: &mut State, wm: &Wm) {
+        for code in std::mem::take(&mut state.keys) {
+            wm.send(Input::Key {
+                code,
+                pressed: false,
+            });
+        }
+        state.escape_since = None;
+        state.focus = None;
+        state.captured = false;
+        wm.send(Input::Focus(None));
+    }
+
     /// The keyboard is the focused window's while the crosshair is on it.
     fn capture(&self, state: &mut State, wm: &Wm) {
         if let Some(since) = state.escape_since
@@ -426,8 +444,7 @@ impl WmWorld {
         {
             // Held Escape: the keyboard goes back to the game until a window is clicked.
             state.escape_since = None;
-            state.focus = None;
-            wm.send(Input::Focus(None));
+            self.release_focus(state, wm);
         }
         let captured = state.focus.is_some()
             && state.carry.is_none()
@@ -853,6 +870,9 @@ impl Hooks for Hooked {
             KeyRegistration::new("recall", "key.keyboard.r").label("key.wm_world.recall"),
         );
         r.register_key_mapping(
+            KeyRegistration::new("release", "key.keyboard.left.win").label("key.wm_world.release"),
+        );
+        r.register_key_mapping(
             KeyRegistration::new("terminal", "key.keyboard.grave.accent")
                 .label("key.wm_world.terminal"),
         );
@@ -911,7 +931,7 @@ impl Hooks for Hooked {
 
     fn key_capture(
         &self,
-        _host: &mut dyn ClientHost,
+        host: &mut dyn ClientHost,
         event: &mut mod_api::KeyCaptureEvent<'_>,
     ) -> Flow {
         let Some(wm) = wayland_wm::wm() else {
@@ -919,6 +939,25 @@ impl Hooks for Hooked {
         };
         let mut state = this().lock();
         let code = event.raw_code;
+        // The release key (Super unless rebound) gives the keyboard back to the game, whatever
+        // window has it; it never reaches the window.
+        let release = host.mod_key(MOD_ID, "release").map(|(key, _)| key);
+        if release.as_deref() == Some(event.key) {
+            match event.action {
+                KeyAction::Press if state.focus.is_some() => {
+                    this().release_focus(&mut state, wm);
+                    state.release_held = true;
+                    return Flow::Cancel;
+                }
+                KeyAction::Repeat | KeyAction::Release if state.release_held => {
+                    if matches!(event.action, KeyAction::Release) {
+                        state.release_held = false;
+                    }
+                    return Flow::Cancel;
+                }
+                _ => {}
+            }
+        }
         log::debug!(
             "wm_world: key {} {code} {:?} captured {} focus {:?} gaze {:?}",
             event.key,

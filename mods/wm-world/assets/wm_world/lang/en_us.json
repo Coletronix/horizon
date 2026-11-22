@@ -1,11 +1,12 @@
 {
   "key.wm_world.recall": "Bring back a put-away window",
   "key.wm_world.terminal": "Open a terminal",
-  "wm_world.hud.typing": "Typing into %s · look away to stop, hold Esc to leave it",
+  "wm_world.hud.typing": "Typing into %s · look away to stop, %s to leave it",
   "wm_world.hud.carrying": "Carrying · scroll: nearer or farther · right-click: set it down",
   "wm_world.hud.resizing": "Resizing · let go of right-click when it fits",
   "wm_world.hud.frame": "Right-click: carry · sneak + right-click an edge: resize · hold attack: put away",
   "wm_world.hud.pocket": "%s put away · press R to bring one back",
   "wm_world.setting.hints": "Hints on the HUD",
-  "wm_world.setting.hints.tooltip": "What looking at, carrying or typing into a window does, at the top of the screen"
+  "wm_world.setting.hints.tooltip": "What looking at, carrying or typing into a window does, at the top of the screen",
+  "key.wm_world.release": "Leave the window you're typing into"
 }
