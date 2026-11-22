@@ -33,6 +33,8 @@ use std::time::Instant;
 use wayland_wm::{Input, Presenter, Window, WindowId, Wm, button};
 
 const MOD_ID: &str = "wm_world";
+/// The setting that shows the hints on the HUD (on unless turned off).
+const HINTS_SETTING: &str = "hints";
 /// How far the crosshair reaches windows to point at them, in blocks.
 const POINT_REACH: f64 = 64.0;
 /// How far it reaches to grab, resize or mine one: a player's block reach.
@@ -842,6 +844,11 @@ pub struct Hooked;
 #[mod_api::horizon_mod]
 impl Hooks for Hooked {
     fn register(&self, r: &mut dyn Registrar, _cx: &RegistrationContext) {
+        let hints = mod_api::SettingSpec::toggle(HINTS_SETTING, "wm_world.setting.hints", true)
+            .tooltip("wm_world.setting.hints.tooltip");
+        if let Err(error) = r.register_setting(hints) {
+            log::warn!("wm_world: the hints setting wasn't registered: {error:?}");
+        }
         r.register_key_mapping(
             KeyRegistration::new("recall", "key.keyboard.r").label("key.wm_world.recall"),
         );

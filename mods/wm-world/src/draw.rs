@@ -53,7 +53,10 @@ pub fn world(state: &State, windows: &[Window], event: &mut RenderLevelStageEven
     shown.sort_by(|a, b| distance(b.0).total_cmp(&distance(a.0)));
     for (placed, window) in shown {
         slab(state, placed, eye, event);
-        layers(placed, window, event);
+        // From behind (or edge on) a window is its back: its screen isn't seen through it.
+        if placed.pose.local(eye)[2] > DEPTH / 2.0 {
+            layers(placed, window, event);
+        }
     }
     if let Some(drag) = state.drag
         && let Some(placed) = state.placed(drag.window)
@@ -125,29 +128,25 @@ fn slab(state: &State, placed: &Placed, eye: V3, event: &mut RenderLevelStageEve
         (rect(hw, -hh, ow, hh, hz), bezel),
         (rect(-hw, -hh, hw, hh, hz), SCREEN_OFF),
     ];
-    // Faces turned away from the eye first.
-    let facing = |corners: &[V3; 4]| {
-        let centre = space::mul(
-            space::add(
-                space::add(corners[0], corners[1]),
-                space::add(corners[2], corners[3]),
-            ),
-            0.25,
-        );
-        let normal = space::cross(
-            space::sub(corners[1], corners[0]),
-            space::sub(corners[2], corners[1]),
-        );
-        space::dot(normal, space::sub(eye, centre)) > 0.0
-    };
-    let mut faces: Vec<([V3; 4], u32)> = Vec::new();
-    faces.push((back, BACK_COLOUR));
-    faces.extend(sides.iter().map(|s| (*s, SIDE_COLOUR)));
-    faces.extend(front);
-    faces.sort_by_key(|(corners, _)| facing(corners));
+    // Faces turned away from the eye first, each by its outward normal.
+    let basis = placed.pose.basis();
+    let neg = |v: V3| space::mul(v, -1.0);
+    let mut faces: Vec<([V3; 4], u32, V3)> = Vec::new();
+    faces.push((back, BACK_COLOUR, neg(basis.out)));
+    let side_normals = [neg(basis.right), basis.right, basis.up, neg(basis.up)];
+    faces.extend(
+        sides
+            .iter()
+            .zip(side_normals)
+            .map(|(s, n)| (*s, SIDE_COLOUR, n)),
+    );
+    faces.extend(front.into_iter().map(|(c, colour)| (c, colour, basis.out)));
+    let facing =
+        |corners: &[V3; 4], normal: V3| space::dot(normal, space::sub(eye, corners[0])) > 0.0;
+    faces.sort_by_key(|(corners, _, normal)| facing(corners, *normal));
     let quads: Vec<WorldQuad> = faces
         .into_iter()
-        .map(|(corners, colour)| WorldQuad::new(corners, colour, WorldDepth::Tested))
+        .map(|(corners, colour, _)| WorldQuad::new(corners, colour, WorldDepth::Tested))
         .collect();
     let _ = event.draw.quads(&quads);
 }
@@ -246,23 +245,38 @@ fn ghost(placed: &Placed, size: [i32; 2], event: &mut RenderLevelStageEvent<'_>)
     let _ = event.draw.lines(&lines);
 }
 
-/// One line of hint text, centred near the top of the screen.
-fn hint(host: &dyn ClientHost, draw: &mut dyn DrawContext, text: Text, row: f32) {
-    let Ok(line) = host.text_string(&text) else {
-        return;
+/// A hint, centred near the top of the screen, wrapped to fit it; `row` is the first line's, and
+/// the next free row comes back.
+fn hint(host: &dyn ClientHost, draw: &mut dyn DrawContext, text: Text, row: f32) -> f32 {
+    let Ok(text) = host.text_string(&text) else {
+        return row;
     };
     let [w, _] = draw.size();
-    let width = draw.text_width(&line);
-    draw.fill(
-        [(w - width) / 2.0 - 3.0, 4.0 + row * 12.0, width + 6.0, 11.0],
-        0x90000000,
-    );
-    draw.text(
-        &line,
-        [(w - width) / 2.0, 5.0 + row * 12.0],
-        0xFFFFFFFF,
-        true,
-    );
+    let room = (w - 16.0).max(40.0);
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split(' ') {
+        match lines.last_mut() {
+            Some(line) if draw.text_width(&format!("{line} {word}")) <= room => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    let mut row = row;
+    for line in lines {
+        let width = draw.text_width(&line);
+        let y = 4.0 + row * 12.0;
+        draw.fill([(w - width) / 2.0 - 3.0, y, width + 6.0, 11.0], 0x90000000);
+        draw.text(&line, [(w - width) / 2.0, y + 1.0], 0xFFFFFFFF, true);
+        row += 1.0;
+    }
+    row
+}
+
+/// Whether the player wants the hints (the `hints` setting on the mod's page in Options > Mods).
+fn hints_on(host: &dyn ClientHost) -> bool {
+    host.setting(crate::MOD_ID, crate::HINTS_SETTING).as_deref() != Some("false")
 }
 
 /// What the player is doing with windows, and how to stop.
@@ -274,44 +288,43 @@ pub fn hud(host: &dyn ClientHost, state: &State, windows: &[Window], draw: &mut 
             .map(|w| w.title.clone())
             .unwrap_or_default()
     };
+    if !hints_on(host) {
+        return;
+    }
     let mut row = 0.0;
     if state.captured
         && let Some(focus) = state.focus
     {
-        hint(
+        row = hint(
             host,
             draw,
             Text::translate("wm_world.hud.typing", vec![Text::literal(title(focus))]),
             row,
         );
-        row += 1.0;
     } else if state.carry.is_some() {
-        hint(
+        row = hint(
             host,
             draw,
             Text::translate("wm_world.hud.carrying", vec![]),
             row,
         );
-        row += 1.0;
     } else if state.drag.is_some() {
-        hint(
+        row = hint(
             host,
             draw,
             Text::translate("wm_world.hud.resizing", vec![]),
             row,
         );
-        row += 1.0;
     } else if let Some(gaze) = state.gaze
         && !matches!(gaze.part, Part::Screen(_))
         && gaze.distance <= HAND_REACH
     {
-        hint(
+        row = hint(
             host,
             draw,
             Text::translate("wm_world.hud.frame", vec![]),
             row,
         );
-        row += 1.0;
     }
     if !state.pocket.is_empty() {
         hint(
