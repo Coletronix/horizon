@@ -238,9 +238,11 @@ fn cursor(state: &State, event: &mut RenderLevelStageEvent<'_>) {
     }
     let hw = f64::from(placed.size[0]) * placed.pixel / 2.0;
     let hh = f64::from(placed.size[1]) * placed.pixel / 2.0;
+    // Its texture holds `scale` pixels per logical one.
+    let scale = f64::from(wayland_wm::wm().map_or(1, |wm| wm.scale()).max(1));
     let x0 = at[0] - f64::from(cursor.hotspot[0]);
     let y0 = at[1] - f64::from(cursor.hotspot[1]);
-    let (x1, y1) = (x0 + f64::from(w), y0 + f64::from(h));
+    let (x1, y1) = (x0 + f64::from(w) / scale, y0 + f64::from(h) / scale);
     let z = DEPTH / 2.0 + 0.01;
     let corner = |x: f64, y: f64| {
         placed

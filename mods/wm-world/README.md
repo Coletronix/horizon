@@ -27,6 +27,7 @@ with the game's own controls.
   way. The window being carried, resized or typed into stands firm and pushes the others along.
 - **Pixel-true aim**: over the window being typed into, mouse sensitivity drops so that one mouse
   step moves about one of its pixels.
+- **Sharp windows** (a setting): programs draw at twice the pixels, so text stays crisp up close.
 - **Size**: 256 window pixels to a block. A window is 2/16 of a block thick, with a 1.5/16 bezel.
 - **Kept across restarts**: where windows stand is written beside the session
   (`$XDG_RUNTIME_DIR/horizon-wm-world.json`), so a game that crashes and starts again puts them back.

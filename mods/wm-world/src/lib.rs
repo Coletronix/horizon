@@ -36,6 +36,8 @@ use std::time::Instant;
 use wayland_wm::{Input, Presenter, Window, WindowId, Wm, button};
 
 const MOD_ID: &str = "wm_world";
+/// The setting that has programs draw at twice the pixels (off unless turned on).
+const SHARP_SETTING: &str = "sharp_windows";
 /// The setting that curves snapped rows towards the player (on unless turned off).
 const CURVE_SETTING: &str = "curved_rows";
 /// How far each window snapped beside another turns towards the row's viewer, in degrees.
@@ -423,6 +425,13 @@ impl WmWorld {
         let eye = camera.position;
         let dir = space::forward(camera.yaw, camera.pitch);
         self.enter_world(&mut state, wm, host);
+        let sharp = host.setting(MOD_ID, SHARP_SETTING).as_deref() == Some("true");
+        // `HORIZON_WM_SCALE` overrides it, for trying scales out.
+        let scale = std::env::var("HORIZON_WM_SCALE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(if sharp { 2 } else { 1 });
+        wm.set_scale(scale);
         let playing = host.playing();
         if !playing {
             state.playing_since = None;
@@ -1232,6 +1241,12 @@ impl Hooks for Hooked {
             .tooltip("wm_world.setting.hints.tooltip");
         if let Err(error) = r.register_setting(hints) {
             log::warn!("wm_world: the hints setting wasn't registered: {error:?}");
+        }
+        let sharp =
+            mod_api::SettingSpec::toggle(SHARP_SETTING, "wm_world.setting.sharp_windows", false)
+                .tooltip("wm_world.setting.sharp_windows.tooltip");
+        if let Err(error) = r.register_setting(sharp) {
+            log::warn!("wm_world: the sharp windows setting wasn't registered: {error:?}");
         }
         let curve =
             mod_api::SettingSpec::toggle(CURVE_SETTING, "wm_world.setting.curved_rows", true)

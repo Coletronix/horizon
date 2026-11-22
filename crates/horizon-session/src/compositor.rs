@@ -576,6 +576,23 @@ impl State {
             ToSession::Input(input) => self.input(input),
             ToSession::FrameDone => self.frame_done(),
             ToSession::Consumed { surface, seq } => self.consumed(surface, seq),
+            ToSession::Scale { scale } => {
+                let scale = scale.clamp(1, 3) as i32;
+                log::info!("programs draw at {scale}x");
+                self.output
+                    .change_current_state(None, None, Some(Scale::Integer(scale)), None);
+                // Programs that read the scale off each surface (wl_surface 6) hear it there.
+                for surface in self.surfaces.values().filter_map(|s| s.upgrade().ok()) {
+                    with_states(&surface, |states| {
+                        smithay::wayland::compositor::send_surface_state(
+                            &surface,
+                            states,
+                            scale,
+                            Transform::Normal,
+                        );
+                    });
+                }
+            }
             ToSession::Clipboard { text } => {
                 let mimes = TEXT_MIMES.iter().map(|m| m.to_string()).collect();
                 let seat = self.seat.clone();

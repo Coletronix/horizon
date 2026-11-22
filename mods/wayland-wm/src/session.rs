@@ -195,6 +195,9 @@ fn serve(wm: &Wm, stream: UnixStream) -> std::io::Result<()> {
                         connected.elapsed()
                     );
                     wm.connected_to(socket, instance);
+                    if wm.scale() != 1 {
+                        wm.link.send(ToSession::Scale { scale: wm.scale() });
+                    }
                 }
                 ToGame::Pixels {
                     surface,

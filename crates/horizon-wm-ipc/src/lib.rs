@@ -19,7 +19,7 @@ use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 
 /// Bumped when a message changes shape; both ends refuse a peer with another version.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// The variable the session sets for the game it starts: its control socket's path.
 pub const SESSION_ENV: &str = "HORIZON_SESSION";
@@ -152,6 +152,11 @@ pub enum ToSession {
     /// Start a shell command as a program of this session.
     Spawn {
         command: String,
+    },
+    /// Have programs draw at this many pixels per logical pixel (1, or 2 for sharper windows
+    /// seen up close).
+    Scale {
+        scale: u32,
     },
     /// The desktop's clipboard text: programs of the session paste it.
     Clipboard {

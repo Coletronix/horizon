@@ -130,6 +130,8 @@ pub struct Wm {
     /// copied that the desktop doesn't have yet.
     clipboard: Mutex<Clipboard>,
     cursor: Mutex<Option<Cursor>>,
+    /// The pixels per logical pixel programs are asked to draw at.
+    scale: AtomicU64,
     instance: AtomicU64,
     windows: Mutex<Arc<Vec<Window>>>,
     generation: AtomicU64,
@@ -153,6 +155,7 @@ fn start() -> Option<&'static Wm> {
             socket: Mutex::new(None),
             clipboard: Mutex::new(Clipboard::default()),
             cursor: Mutex::new(None),
+            scale: AtomicU64::new(1),
             instance: AtomicU64::new(0),
             windows: Mutex::new(Arc::new(Vec::new())),
             generation: AtomicU64::new(0),
@@ -225,6 +228,20 @@ impl Wm {
     fn disconnected(&self) {
         *self.socket.lock().unwrap_or_else(|p| p.into_inner()) = None;
         self.publish(Vec::new());
+    }
+
+    /// Ask programs to draw at `scale` pixels per logical pixel (1, or 2 for sharper windows up
+    /// close): windows keep their size; their textures get finer. Kept across reconnections.
+    pub fn set_scale(&self, scale: u32) {
+        if self.scale.swap(u64::from(scale), Ordering::AcqRel) != u64::from(scale) {
+            #[cfg(target_os = "linux")]
+            self.link.send(horizon_wm_ipc::ToSession::Scale { scale });
+        }
+    }
+
+    /// The pixels per logical pixel programs draw at ([`set_scale`](Self::set_scale)).
+    pub fn scale(&self) -> u32 {
+        self.scale.load(Ordering::Acquire) as u32
     }
 
     /// The pointer's image the program under the pointer set, if it drew one: presenters draw
