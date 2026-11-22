@@ -112,7 +112,8 @@ struct State {
     gaze: Option<Gaze>,
     /// The window with the keyboard: it keeps it until another is clicked or Escape is held.
     focus: Option<WindowId>,
-    /// The keyboard goes to `focus` now: the crosshair is on it.
+    /// The keyboard goes to `focus` now: the crosshair is on its screen (the bezel is the
+    /// window as a thing: sneaking to resize it needs Shift).
     captured: bool,
     /// Keys and buttons a window has down: it gets their release whatever happens.
     keys: BTreeSet<u32>,
@@ -131,6 +132,8 @@ struct State {
     dirty_since: Option<Instant>,
     /// Since when the player has been playing (no screen over the world).
     playing_since: Option<Instant>,
+    /// The player has been playing a moment: new windows can be placed in front of them.
+    settled: bool,
 }
 
 impl State {
@@ -152,11 +155,14 @@ pub struct WmWorld {
     registered: OnceLock<()>,
 }
 
-/// Each layer's rectangle in window pixels.
+/// Each popup's rectangle in window pixels: popups take the pointer past the window's edge. The
+/// window's own surfaces don't: what lies outside its geometry is a client-side shadow, over the
+/// bezel.
 fn layer_rects(window: &Window) -> Vec<[f64; 4]> {
     window
         .layers
         .iter()
+        .filter(|l| l.popup)
         .map(|l| {
             [
                 f64::from(l.at[0]),
@@ -187,11 +193,17 @@ impl WmWorld {
             return;
         }
         if state.instance != wm.session_instance() {
-            let (instance, eye, since) = (wm.session_instance(), state.eye, state.playing_since);
+            let (instance, eye, since, settled) = (
+                wm.session_instance(),
+                state.eye,
+                state.playing_since,
+                state.settled,
+            );
             *state = State {
                 instance,
                 eye,
                 playing_since: since,
+                settled,
                 ..store::load(instance).unwrap_or_default()
             };
         }
@@ -243,7 +255,7 @@ impl WmWorld {
                 }
                 Some(_) => {}
                 None => {
-                    if state.eye.is_none() {
+                    if !state.settled {
                         // Not yet known where the player looks: placed on a later frame.
                         state.generation = None;
                         continue;
@@ -347,7 +359,8 @@ impl WmWorld {
         let settled = state
             .playing_since
             .is_some_and(|t| t.elapsed().as_secs_f64() >= SETTLE);
-        state.eye = settled.then_some((eye, dir, camera.yaw, camera.pitch));
+        state.eye = Some((eye, dir, camera.yaw, camera.pitch));
+        state.settled = settled;
         self.sync(&mut state, wm, &windows);
 
         let block = host.view_hit().map(|(d, _)| f64::from(d));
@@ -416,7 +429,9 @@ impl WmWorld {
         }
         let captured = state.focus.is_some()
             && state.carry.is_none()
-            && state.gaze.is_some_and(|g| Some(g.window) == state.focus);
+            && state.gaze.is_some_and(|g| {
+                Some(g.window) == state.focus && matches!(g.part, Part::Screen(_))
+            });
         if state.captured && !captured {
             // Looking away: the window lets go of every key it has down.
             for code in std::mem::take(&mut state.keys) {
@@ -583,9 +598,25 @@ impl WmWorld {
         state.changed();
     }
 
-    /// The last window put away comes back, in front of the player.
+    /// The last window put away comes back, in front of the player. With none put away, the
+    /// farthest window does: a window lost behind a wall or far away is never out of reach.
     fn recall(&self, state: &mut State, wm: &Wm, windows: &[Window]) {
-        let Some(window) = state.pocket.pop() else {
+        let farthest = || {
+            let (eye, ..) = state.eye?;
+            state
+                .placed
+                .iter()
+                .filter(|p| !p.pocketed)
+                .max_by(|a, b| {
+                    let d = |p: &Placed| {
+                        let v = space::sub(p.pose.centre, eye);
+                        space::dot(v, v)
+                    };
+                    d(a).total_cmp(&d(b))
+                })
+                .map(|p| p.window)
+        };
+        let Some(window) = state.pocket.pop().or_else(farthest) else {
             return;
         };
         let pose = windows
@@ -622,7 +653,7 @@ impl WmWorld {
         }
     }
 
-    /// A mouse button. `sneaking`: Shift (the default sneak key) is held.
+    /// A mouse button. `sneaking`: the sneak mapping is held.
     fn mouse(
         &self,
         host: &mut dyn ClientHost,
@@ -643,10 +674,9 @@ impl WmWorld {
         };
         let mut state = self.lock();
         log::debug!(
-            "wm_world: button {button:#x} {} gaze {:?} playing {}",
+            "wm_world: button {button:#x} {} gaze {:?} sneaking {sneaking}",
             if pressed { "down" } else { "up" },
             state.gaze,
-            host.playing()
         );
         if !pressed {
             // Releases go wherever their press went.
@@ -834,7 +864,9 @@ impl Hooks for Hooked {
         host: &mut dyn ClientHost,
         event: &mut mod_api::MouseButtonPreEvent,
     ) -> Flow {
-        this().mouse(host, event.button, event.pressed, event.modifiers & 1 != 0)
+        // Sneaking as the game knows it: the sneak mapping, wherever it's bound (or toggled).
+        let sneaking = matches!(host.mapping("key.sneak"), Ok(Some(m)) if m.down);
+        this().mouse(host, event.button, event.pressed, sneaking)
     }
 
     fn mouse_scrolling(
@@ -880,6 +912,14 @@ impl Hooks for Hooked {
         };
         let mut state = this().lock();
         let code = event.raw_code;
+        log::debug!(
+            "wm_world: key {} {code} {:?} captured {} focus {:?} gaze {:?}",
+            event.key,
+            event.action,
+            state.captured,
+            state.focus,
+            state.gaze
+        );
         match event.action {
             KeyAction::Press if state.captured => {
                 if code == KEY_ESC {

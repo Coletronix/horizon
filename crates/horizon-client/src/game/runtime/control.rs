@@ -347,7 +347,7 @@ impl Game<'_> {
         if let Some((key, action)) = socket_key(line)
             && self.socket_key_captured(key, action)
         {
-            return Ok(None);
+            return Ok(Some(json!({ "ok": true, "captured": true })));
         }
         let released = released_modifier(line);
         // The socket's own key, mouse and typing commands are input, as the window's events are.

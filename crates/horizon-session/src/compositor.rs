@@ -781,6 +781,7 @@ impl State {
             }
             Input::Focus(window) => self.focus(window, serial),
             Input::Resize { window, size } => {
+                log::debug!("asking window {} to be {}x{}", window.0, size[0], size[1]);
                 if let Some(toplevel) = self.toplevel(window) {
                     let surface = toplevel.window.toplevel().expect("wayland window");
                     surface.with_pending_state(|state| {

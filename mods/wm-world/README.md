@@ -14,7 +14,7 @@ with the game's own controls.
 | Carry | Right-click the bezel, back or a side; the wheel brings it nearer or pushes it away; right-click sets it down |
 | Resize | Sneak and right-click the bezel near an edge or corner, drag, let go |
 | Put away | Hold attack on the bezel: the window leaves the world and its program is suspended |
-| Bring back | The recall key (R) brings the last window put away in front of you |
+| Bring back | The recall key (R) brings the last window put away in front of you; with none put away, the farthest window (one lost behind a wall or far away) |
 | Open a terminal | The terminal key (`` ` ``): `HORIZON_WM_TERMINAL`, else the first of foot, alacritty, kitty, wezterm, konsole, gnome-terminal, xterm |
 
 - **New windows** open in front of the player and face them, stepping aside from windows already

@@ -152,19 +152,52 @@ fn slab(state: &State, placed: &Placed, eye: V3, event: &mut RenderLevelStageEve
     let _ = event.draw.quads(&quads);
 }
 
-/// The window's surfaces on the front face, popups a little in front of the window.
+/// The window's surfaces on the front face, popups a little in front of the window. The window's
+/// own surfaces are cut to its geometry: their client-side shadows would lie over the bezel.
 fn layers(placed: &Placed, window: &Window, event: &mut RenderLevelStageEvent<'_>) {
     let hw = f64::from(placed.size[0]) * placed.pixel / 2.0;
     let hh = f64::from(placed.size[1]) * placed.pixel / 2.0;
+    let size = [f64::from(placed.size[0]), f64::from(placed.size[1])];
     for (i, layer) in window.layers.iter().enumerate() {
         let z = DEPTH / 2.0 + 0.002 + if layer.popup { 0.004 } else { 0.0 } + i as f64 * 1e-4;
-        let x0 = -hw + f64::from(layer.at[0]) * placed.pixel;
-        let x1 = x0 + f64::from(layer.size[0]) * placed.pixel;
-        let y0 = hh - f64::from(layer.at[1]) * placed.pixel;
-        let y1 = y0 - f64::from(layer.size[1]) * placed.pixel;
-        let at = |x: f64, y: f64| placed.pose.at(x, y, z);
-        let quad =
-            PipelineQuad::spanning([at(x0, y0), at(x0, y1), at(x1, y1), at(x1, y0)], 0xFFFFFFFF);
+        let (at, extent) = (
+            [f64::from(layer.at[0]), f64::from(layer.at[1])],
+            [f64::from(layer.size[0]), f64::from(layer.size[1])],
+        );
+        if extent[0] <= 0.0 || extent[1] <= 0.0 {
+            continue;
+        }
+        // The part shown, in window pixels.
+        let (mut a, mut b) = (at, [at[0] + extent[0], at[1] + extent[1]]);
+        if !layer.popup {
+            a = [a[0].max(0.0), a[1].max(0.0)];
+            b = [b[0].min(size[0]), b[1].min(size[1])];
+            if b[0] <= a[0] || b[1] <= a[1] {
+                continue;
+            }
+        }
+        let u = |x: f64| ((x - at[0]) / extent[0]) as f32;
+        let v = |y: f64| ((y - at[1]) / extent[1]) as f32;
+        let corner = |x: f64, y: f64| {
+            placed
+                .pose
+                .at(-hw + x * placed.pixel, hh - y * placed.pixel, z)
+        };
+        let quad = PipelineQuad::new(
+            [
+                corner(a[0], a[1]),
+                corner(a[0], b[1]),
+                corner(b[0], b[1]),
+                corner(b[0], a[1]),
+            ],
+            [
+                [u(a[0]), v(a[1])],
+                [u(a[0]), v(b[1])],
+                [u(b[0]), v(b[1])],
+                [u(b[0]), v(a[1])],
+            ],
+            0xFFFFFFFF,
+        );
         let _ = event
             .draw
             .live_quads(&layer.texture, &[quad], WorldDepth::Tested);

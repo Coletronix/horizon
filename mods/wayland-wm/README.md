@@ -22,7 +22,8 @@ programs ──Wayland──▶ horizon-session ──control socket (pixels, dm
   a second.
 
 This mod decides nothing about how windows look or how the player uses them. **Presenter mods**
-do: they depend on `wayland_wm`, read the windows each frame, draw their layers where they like and
+do ([`wm_world`](../wm-world) stands them in the world as things the player looks at, clicks,
+carries and puts away): they depend on `wayland_wm`, read the windows each frame, draw their layers where they like and
 send the player's input back. Several presenters can run at once.
 
 ## For presenter mods
@@ -94,4 +95,4 @@ HORIZON_WM_OVERLAY=1 HORIZON_WM_SPAWN=foot \
 - `HORIZON_WM_SPAWN`: a program to start in the compositor when the game starts.
 
 Not there yet: XWayland (X11 programs), clipboard and drag and drop, cursor images, popup grabs,
-fractional scale, the presenters' own input model.
+fractional scale, running as the login session itself (DRM/KMS, libinput, a fallback desktop).
