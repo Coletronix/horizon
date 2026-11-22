@@ -96,6 +96,8 @@
     "horizon-modding-examples": "tool",
     "horizon-hooks": "engine",
     "horizon-live-texture": "engine",
+    "mod-wayland_wm": "horizon",
+    "wayland-wm-dev": "tool",
     "horizon-game": "platform",
     "horizon-mod-host": "platform",
     "horizon-telemetry": "horizon",

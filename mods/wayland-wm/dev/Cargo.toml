@@ -1,0 +1,19 @@
+[package]
+name = "wayland-wm-dev"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "The game with the wayland_wm mod linked in, for developing it in this checkout without the launcher"
+
+[[bin]]
+name = "wayland-wm-dev"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+wayland_wm = { package = "mod-wayland_wm", path = ".." }
+mod-api = { package = "horizon-mod-api", path = "../../../crates/horizon-mod-api" }
+horizon-guest-stack = { path = "../../../crates/horizon-guest-stack" }
+horizon-client = { path = "../../../crates/horizon-client" }
+horizon-mod-host = { path = "../../../crates/horizon-mod-host" }

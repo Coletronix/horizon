@@ -1,0 +1,9 @@
+id = "wayland_wm"
+name = "Wayland Window Manager"
+version = "0.1.0"
+description = "Runs a Wayland compositor inside the game: Linux programs open their windows into Minecraft. How windows are shown and used is up to presenter mods that depend on this one."
+authors = []
+# A native mod: Rust in src/, compiled by the launcher against the game build [native] pins.
+api = "0.2"
+side = "client"
+capabilities = []
