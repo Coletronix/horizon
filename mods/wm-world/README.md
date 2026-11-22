@@ -15,6 +15,7 @@ with the game's own controls.
 | Carry | Right-click the bezel, back or a side; the wheel brings it nearer or pushes it away; right-click sets it down |
 | Line up | Set a carried window down beside another: it snaps against its side, tops level, turned a little towards you so a row curves around you ("Curved rows" turns that off) |
 | Herd | Right-click a window's bezel holding a lead: it follows you (any number of them, pushing each other apart as they go). Right-click a block with the lead to tie them there; right-click a window with the lead again to let it go |
+| Monitor wall | Build a flat rectangle of Monitor blocks (up to 16 by 16), right-click it with a window item: the window stands on it, sized to fill it, and stays put |
 | Lock in place | Right-click the bezel with honeycomb: the waxed window (honey-coloured bezel) can't be carried, resized or pushed; an axe scrapes the wax off |
 | Resize | Sneak and right-click the bezel near an edge or corner, drag, let go |
 | Put away | Hold attack on the bezel: the window leaves the world and its program is suspended |

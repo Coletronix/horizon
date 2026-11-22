@@ -15,5 +15,6 @@
   "wm_world.setting.curved_rows.tooltip": "A window set down beside another turns a little towards you, so a row of windows curves around where you stand",
   "wm_world.hud.waxed": "Waxed: it stays put · an axe scrapes the wax off · hold attack: put away",
   "wm_world.setting.sharp_windows": "Sharp windows",
-  "wm_world.setting.sharp_windows.tooltip": "Programs draw their windows at twice the pixels, so text stays crisp up close; it costs more of your graphics card"
+  "wm_world.setting.sharp_windows.tooltip": "Programs draw their windows at twice the pixels, so text stays crisp up close; it costs more of your graphics card",
+  "block.wm_world.screen": "Monitor"
 }

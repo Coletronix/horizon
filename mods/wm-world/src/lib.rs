@@ -22,6 +22,7 @@
 mod apps;
 mod draw;
 mod items;
+mod monitor;
 mod space;
 mod store;
 
@@ -96,6 +97,9 @@ enum Tether {
     /// A block the lead was tied to: the window stays near it.
     Post([i32; 3]),
 }
+
+/// The monitor block's key, resolved at registration.
+static SCREEN: OnceLock<mod_api::BlockKey> = OnceLock::new();
 
 /// The lead's item key, resolved at registration.
 static LEAD: OnceLock<mod_api::ItemKey> = OnceLock::new();
@@ -918,6 +922,34 @@ impl WmWorld {
         }
     }
 
+    /// A window item used on a monitor wall: its window stands on the wall, sized to fill it,
+    /// and stays put.
+    fn fill_wall(&self, key: items::WindowKey, found: monitor::Wall, face: [i32; 3]) {
+        let Some(wm) = wayland_wm::wm() else { return };
+        let mut state = self.lock();
+        let Some(window) = items::local_window(key, state.instance) else {
+            return;
+        };
+        state.itemised.remove(&window);
+        state.pocket.retain(|w| *w != window);
+        let world = state.world.clone();
+        let Some(placed) = state.placed_mut(window) else {
+            return;
+        };
+        placed.pose = found.pose(face);
+        placed.pocketed = false;
+        placed.world = world;
+        placed.waxed = true;
+        placed.anchor = Edges::default();
+        let size = found.window_size(placed.pixel);
+        wm.send(Input::Visible {
+            window,
+            visible: true,
+        });
+        wm.send(Input::Resize { window, size });
+        state.changed();
+    }
+
     /// The mod's own keys.
     fn keys(&self, state: &mut State, wm: &Wm, host: &mut dyn ClientHost) {
         if host.consume_click(MOD_ID, "recall") {
@@ -1227,6 +1259,7 @@ impl Hooks for Hooked {
         // instead of becoming items).
         items::set_key(r.item_key(items::WINDOW_ITEM));
         let _ = LEAD.set(r.item_key("minecraft:lead"));
+        let _ = SCREEN.set(r.block_key(monitor::SCREEN_BLOCK));
         let _ = HONEYCOMB.set(r.item_key("minecraft:honeycomb"));
         let _ = AXES.set(
             [
@@ -1277,6 +1310,10 @@ impl Hooks for Hooked {
             KeyRegistration::new("terminal", "key.keyboard.grave.accent")
                 .label("key.wm_world.terminal"),
         );
+    }
+
+    fn blocks(&self, _context: &RegistrationContext, event: &mut mod_api::BlocksEvent<'_>) {
+        monitor::declare(event.blocks);
     }
 
     fn items(&self, _context: &RegistrationContext, event: &mut mod_api::ItemsEvent<'_>) {
@@ -1378,6 +1415,40 @@ impl Hooks for Hooked {
         host: mod_api::HostSide,
         event: &mut mod_api::RightClickBlockEvent<'_>,
     ) -> Flow {
+        // A window item on a wall of monitor blocks: the window fills the wall.
+        if let Some((key, _)) = event.click.stack.and_then(items::key_of) {
+            let dimension = event.click.dimension.key().to_string();
+            let on_screen = |host: &dyn mod_api::Host, at: [i32; 3]| {
+                let level = host.level(&dimension);
+                level.and_then(|l| l.block(host, at)) == SCREEN.get().copied()
+            };
+            match host {
+                mod_api::HostSide::Client(host) => {
+                    let face = event.click.hit.face;
+                    let found = monitor::wall(event.click.pos, face, |at| on_screen(&*host, at));
+                    let Some(found) = found else {
+                        return Flow::Continue;
+                    };
+                    this().fill_wall(key, found, face);
+                }
+                mod_api::HostSide::Server(host) => {
+                    if !on_screen(&*host, event.click.pos) {
+                        return Flow::Continue;
+                    }
+                    if let Some(player) = host.player(event.click.player) {
+                        let slot = match event.click.hand {
+                            mod_api::Hand::Off => Some(40),
+                            _ => player.selected_slot(&*host).map(|s| s as u32),
+                        };
+                        if let Some(slot) = slot {
+                            let _ = player.set_inventory_slot(host, slot, None);
+                        }
+                    }
+                }
+            }
+            *event.cancellation_result = mod_api::InteractionResult::Success;
+            return Flow::Cancel;
+        }
         // With windows following on leads, a click on a block with the lead ties them to it.
         let mod_api::HostSide::Client(host) = host else {
             return Flow::Continue;
