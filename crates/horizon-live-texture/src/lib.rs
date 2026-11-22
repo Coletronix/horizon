@@ -449,14 +449,19 @@ fn copy_region(
         let src = &bytes[y * stride + x0..y * stride + x1];
         let dst = &mut mirror[y * row + x0..y * row + x1];
         let (rgb, opaque) = (format.rgb_order(), format.opaque());
-        for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+        for (d, s) in dst
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(src.as_chunks::<4>().0)
+        {
             let [r, g, b] = if rgb {
                 [s[0], s[1], s[2]]
             } else {
                 [s[2], s[1], s[0]]
             };
             let a = if opaque { 255 } else { s[3] };
-            *<&mut [u8; 4]>::try_from(d).expect("4 bytes") = if a == 255 {
+            *d = if a == 255 {
                 [r, g, b, 255]
             } else if a == 0 {
                 [0, 0, 0, 0]
