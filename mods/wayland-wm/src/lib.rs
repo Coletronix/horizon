@@ -1,8 +1,8 @@
-//! A Wayland compositor inside the game.
+//! Desktop windows in the game.
 //!
-//! This mod runs a Wayland server on its own thread. Linux programs started with its
-//! `WAYLAND_DISPLAY` ([`Wm::socket_name`], [`Wm::spawn`]) open their windows into it, and each
-//! window's surfaces become [`LiveTexture`]s the game draws.
+//! The windows belong to `horizon-session`, the Wayland compositor that owns the desktop's
+//! programs: they outlive the game. This mod connects the game to it (starting one if none runs),
+//! turns each window's surfaces into [`LiveTexture`]s the game draws, and passes input back.
 //!
 //! This mod does not decide how windows look or how the player uses them. **Presenter mods**
 //! do: they depend on this one, read [`Wm::windows`] every frame, draw the windows' layers where
@@ -26,11 +26,9 @@ use std::sync::{
 mod overlay;
 mod panels;
 #[cfg(target_os = "linux")]
-mod server;
+mod session;
 
-/// A window's identity, unique while this game runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct WindowId(pub u64);
+pub use horizon_wm_ipc::{Input, WindowId, button};
 
 /// One surface of a window, in the window's space.
 #[derive(Clone, Debug)]
@@ -57,6 +55,8 @@ pub struct Window {
     pub size: [i32; 2],
     /// Whether the window has the keyboard ([`Input::Focus`]).
     pub focused: bool,
+    /// The window this one belongs to: a dialog's main window.
+    pub parent: Option<WindowId>,
     /// The window's surfaces, bottom first.
     pub layers: Vec<Layer>,
 }
@@ -66,41 +66,6 @@ impl Window {
     pub fn mapped(&self) -> bool {
         !self.layers.is_empty() && self.size[0] > 0 && self.size[1] > 0
     }
-}
-
-/// Mouse buttons, by their Linux input codes (`BTN_LEFT`...).
-pub mod button {
-    pub const LEFT: u32 = 0x110;
-    pub const RIGHT: u32 = 0x111;
-    pub const MIDDLE: u32 = 0x112;
-    pub const SIDE: u32 = 0x113;
-    pub const EXTRA: u32 = 0x114;
-}
-
-/// What a presenter tells the compositor: the player's input and the window management it decides.
-#[derive(Clone, Debug)]
-pub enum Input {
-    /// The pointer is over `window` at `at` (logical pixels of its space).
-    PointerMotion { window: WindowId, at: [f64; 2] },
-    /// The pointer left every window.
-    PointerLeave,
-    /// A button (a [`button`] code) went down or up where the pointer is.
-    PointerButton { button: u32, pressed: bool },
-    /// Scrolling where the pointer is, in logical pixels (`discrete` in wheel steps, if a wheel).
-    PointerAxis {
-        horizontal: f64,
-        vertical: f64,
-        discrete: Option<[i32; 2]>,
-    },
-    /// A key went down or up, by its Linux input code (`KEY_A` is 30; on Linux the game's raw
-    /// key code is this code).
-    Key { code: u32, pressed: bool },
-    /// Give `window` the keyboard, or no window.
-    Focus(Option<WindowId>),
-    /// Ask `window` to take this size in logical pixels (0 lets it choose).
-    Resize { window: WindowId, size: [i32; 2] },
-    /// Ask `window` to close.
-    Close(WindowId),
 }
 
 /// What a presenter draws each frame. Every method has an empty default.
@@ -139,38 +104,39 @@ pub fn register_presenter(presenter: Arc<dyn Presenter>) {
         .push(presenter);
 }
 
-/// The compositor, once started ([`wm`]).
+/// The game's link to the session ([`wm`]).
 pub struct Wm {
-    socket: String,
+    socket: Mutex<Option<String>>,
     windows: Mutex<Arc<Vec<Window>>>,
     generation: AtomicU64,
     #[cfg(target_os = "linux")]
-    commands: server::Commands,
+    link: session::Link,
 }
 
-static WM: OnceLock<Option<Wm>> = OnceLock::new();
+static WM: OnceLock<Option<&'static Wm>> = OnceLock::new();
 
-/// The compositor: started the first time anything asks, `None` where it can't run (not Linux,
-/// no `XDG_RUNTIME_DIR`, the socket can't be made). Why it couldn't is logged once.
+/// The link to the session: made the first time anything asks; `None` where it can't be (not
+/// Linux, no `XDG_RUNTIME_DIR`). Why is logged once. It may not be connected yet
+/// ([`Wm::connected`]); it connects, and reconnects, by itself.
 pub fn wm() -> Option<&'static Wm> {
-    WM.get_or_init(start).as_ref()
+    *WM.get_or_init(start)
 }
 
-fn start() -> Option<Wm> {
+fn start() -> Option<&'static Wm> {
     #[cfg(target_os = "linux")]
-    match server::start() {
-        Ok((socket, commands)) => {
-            log::info!("wayland_wm: compositor listening on WAYLAND_DISPLAY={socket}");
-            Some(Wm {
-                socket,
-                windows: Mutex::new(Arc::new(Vec::new())),
-                generation: AtomicU64::new(0),
-                commands,
-            })
-        }
-        Err(error) => {
-            log::warn!("wayland_wm: the compositor didn't start: {error}");
-            None
+    {
+        let wm: &'static Wm = Box::leak(Box::new(Wm {
+            socket: Mutex::new(None),
+            windows: Mutex::new(Arc::new(Vec::new())),
+            generation: AtomicU64::new(0),
+            link: session::Link::default(),
+        }));
+        match session::start(wm) {
+            Ok(()) => Some(wm),
+            Err(error) => {
+                log::warn!("wayland_wm: no session: {error}");
+                None
+            }
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -181,12 +147,21 @@ fn start() -> Option<Wm> {
 }
 
 impl Wm {
-    /// The socket's name: what `WAYLAND_DISPLAY` is for a program to open its windows here.
-    pub fn socket_name(&self) -> &str {
-        &self.socket
+    /// The session's `WAYLAND_DISPLAY` while connected.
+    pub fn socket_name(&self) -> Option<String> {
+        self.socket
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
-    /// The windows now, in the order they were opened. Cheap: a shared snapshot.
+    /// Whether the session is connected now.
+    pub fn connected(&self) -> bool {
+        self.socket_name().is_some()
+    }
+
+    /// The windows now, in the order they were opened. Cheap: a shared snapshot. Empty while the
+    /// session isn't connected.
     pub fn windows(&self) -> Arc<Vec<Window>> {
         self.windows
             .lock()
@@ -201,40 +176,47 @@ impl Wm {
         self.generation.load(Ordering::Acquire)
     }
 
-    pub(crate) fn publish(&self, windows: Vec<Window>) {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn publish(&self, windows: Vec<Window>) {
         *self.windows.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(windows);
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Send the compositor the player's input or a window management decision.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn connected_to(&self, socket: String) {
+        *self.socket.lock().unwrap_or_else(|p| p.into_inner()) = Some(socket);
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn disconnected(&self) {
+        *self.socket.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        self.publish(Vec::new());
+    }
+
+    /// Send the session the player's input or a window management decision. Dropped while not
+    /// connected.
     pub fn send(&self, input: Input) {
         #[cfg(target_os = "linux")]
-        self.commands.send(server::Command::Input(input));
+        self.link.send(horizon_wm_ipc::ToSession::Input(input));
         #[cfg(not(target_os = "linux"))]
         let _ = input;
     }
 
-    /// Start `command` (a shell command line) as a program whose windows open here.
-    pub fn spawn(&self, command: &str) -> std::io::Result<std::process::Child> {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .env("WAYLAND_DISPLAY", &self.socket)
-            .env("XDG_SESSION_TYPE", "wayland")
-            .env("GDK_BACKEND", "wayland")
-            .env("QT_QPA_PLATFORM", "wayland")
-            .env("SDL_VIDEODRIVER", "wayland")
-            .env("MOZ_ENABLE_WAYLAND", "1")
-            .env("ELECTRON_OZONE_PLATFORM_HINT", "wayland")
-            // No X server of ours yet: an X program must not open on the player's desktop.
-            .env_remove("DISPLAY")
-            .spawn()
+    /// Start `command` (a shell command line) as a program of the session: its windows open
+    /// here, and it outlives the game.
+    pub fn spawn(&self, command: &str) {
+        #[cfg(target_os = "linux")]
+        self.link.send(horizon_wm_ipc::ToSession::Spawn {
+            command: command.to_string(),
+        });
+        #[cfg(not(target_os = "linux"))]
+        let _ = command;
     }
 
-    /// Tell windows a frame was shown, so they draw their next one.
+    /// Tell windows a frame was shown, so they draw their next.
     fn frame_done(&self) {
         #[cfg(target_os = "linux")]
-        self.commands.send(server::Command::FrameDone);
+        self.link.frame_done();
     }
 }
 
@@ -242,6 +224,8 @@ impl Wm {
 #[derive(Default)]
 pub struct WaylandWm {
     started: OnceLock<()>,
+    /// `HORIZON_WM_SPAWN`, started once the session is connected.
+    spawned: std::sync::atomic::AtomicBool,
 }
 
 impl WaylandWm {
@@ -254,15 +238,21 @@ impl WaylandWm {
             if panels::enabled() {
                 register_presenter(Arc::new(panels::Panels::default()));
             }
-            if let Ok(command) = std::env::var("HORIZON_WM_SPAWN")
-                && !command.trim().is_empty()
-            {
-                match wm.spawn(&command) {
-                    Ok(_) => log::info!("wayland_wm: started `{command}`"),
-                    Err(error) => log::warn!("wayland_wm: `{command}` didn't start: {error}"),
-                }
-            }
+            let _ = wm;
         });
+    }
+
+    /// `HORIZON_WM_SPAWN`: a program to start once, when the session first answers.
+    fn spawn_once(&self, wm: &Wm) {
+        if !wm.connected() || self.spawned.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Ok(command) = std::env::var("HORIZON_WM_SPAWN")
+            && !command.trim().is_empty()
+        {
+            log::info!("wayland_wm: starting `{command}`");
+            wm.spawn(&command);
+        }
     }
 }
 
@@ -271,6 +261,7 @@ impl Hooks for WaylandWm {
     fn render_frame_post(&self, _host: &mut dyn ClientHost, _event: &mut RenderFramePostEvent) {
         self.start_once();
         if let Some(wm) = wm() {
+            self.spawn_once(wm);
             wm.frame_done();
         }
     }

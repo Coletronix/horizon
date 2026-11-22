@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
-description = "A Wayland compositor inside the game, whose windows presenter mods show and drive"
+description = "Desktop windows in the game: connects it to horizon-session, whose windows presenter mods show and drive"
 
 [lib]
 name = "wayland_wm"
@@ -15,6 +15,6 @@ path = "src/lib.rs"
 # in this checkout it is the workspace's own, so engine changes reach the mod at once.
 horizon-mod-api = { path = "../../crates/horizon-mod-api" }
 log = "0.4"
+horizon-wm-ipc = { path = "../../crates/horizon-wm-ipc" }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-smithay = { version = "0.7", default-features = false, features = ["wayland_frontend", "desktop"] }
+

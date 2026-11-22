@@ -39,7 +39,7 @@ const PACKAGE: &[(&str, &str)] = &[
     ("horizon-mod.toml", include_str!("../../horizon-mod.toml")),
     ("Cargo.toml", include_str!("../../Cargo.toml")),
     ("src/lib.rs", include_str!("../../src/lib.rs")),
-    ("src/server.rs", include_str!("../../src/server.rs")),
+    ("src/session.rs", include_str!("../../src/session.rs")),
     ("src/overlay.rs", include_str!("../../src/overlay.rs")),
     ("src/panels.rs", include_str!("../../src/panels.rs")),
 ];

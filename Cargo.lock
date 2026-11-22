@@ -478,6 +478,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43b32313e937c8721c9d17ee9bf60699a6402b4b7c2cb6ac1bee0ffcaa4b4e5e"
 dependencies = [
  "bitflags 2.13.2",
+ "nix",
  "polling",
  "rustix 1.1.5",
  "tracing",
@@ -2868,6 +2869,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-session"
+version = "0.1.0"
+dependencies = [
+ "calloop 0.14.5",
+ "horizon-wm-ipc",
+ "log",
+ "rustix 1.1.5",
+ "smithay",
+]
+
+[[package]]
 name = "horizon-shader-api"
 version = "0.1.0"
 dependencies = [
@@ -2927,6 +2939,15 @@ dependencies = [
  "object 0.39.1",
  "rustc-demangle",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "horizon-wm-ipc"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "rustix 1.1.5",
+ "serde",
 ]
 
 [[package]]
@@ -3660,8 +3681,8 @@ name = "mod-wayland_wm"
 version = "0.1.0"
 dependencies = [
  "horizon-mod-api",
+ "horizon-wm-ipc",
  "log",
- "smithay",
 ]
 
 [[package]]

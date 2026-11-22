@@ -97,6 +97,8 @@
     "horizon-hooks": "engine",
     "horizon-dmabuf": "engine",
     "horizon-live-texture": "engine",
+    "horizon-wm-ipc": "horizon",
+    "horizon-session": "horizon",
     "mod-wayland_wm": "horizon",
     "wayland-wm-dev": "tool",
     "horizon-game": "platform",

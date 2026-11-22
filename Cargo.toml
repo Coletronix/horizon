@@ -9,6 +9,8 @@ members = [
     "crates/horizon-hooks",
     "crates/horizon-live-texture",
     "crates/horizon-dmabuf",
+    "crates/horizon-wm-ipc",
+    "crates/horizon-session",
     "mods/wayland-wm",
     "mods/wayland-wm/dev",
     "crates/horizon-mod-host",
