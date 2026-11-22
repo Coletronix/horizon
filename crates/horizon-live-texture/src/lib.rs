@@ -20,7 +20,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// How a producer's bytes are laid out, per pixel, in memory order.
+/// How a producer's bytes are laid out, per pixel, in memory order. Colours with an alpha byte
+/// are premultiplied, as Wayland's are; the texture stores them straight (not premultiplied), as
+/// the game's other textures are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
     /// B, G, R, A bytes: Wayland's `ARGB8888` on a little-endian machine.
@@ -449,20 +451,18 @@ fn copy_region(
     for y in region.y as usize..(region.y + region.height) as usize {
         let src = &bytes[y * stride + x0..y * stride + x1];
         let dst = &mut mirror[y * row + x0..y * row + x1];
-        match (format.rgb_order(), format.opaque()) {
-            (true, false) => dst.copy_from_slice(src),
-            (rgb, opaque) => {
-                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                    if rgb {
-                        d[..3].copy_from_slice(&s[..3]);
-                    } else {
-                        d[0] = s[2];
-                        d[1] = s[1];
-                        d[2] = s[0];
-                    }
-                    d[3] = if opaque { 255 } else { s[3] };
-                }
-            }
+        let (rgb, opaque) = (format.rgb_order(), format.opaque());
+        for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+            let [r, g, b] = if rgb { [s[0], s[1], s[2]] } else { [s[2], s[1], s[0]] };
+            let a = if opaque { 255 } else { s[3] };
+            *<&mut [u8; 4]>::try_from(d).expect("4 bytes") = if a == 255 {
+                [r, g, b, 255]
+            } else if a == 0 {
+                [0, 0, 0, 0]
+            } else {
+                let straight = |c: u8| ((u32::from(c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
+                [straight(r), straight(g), straight(b), a]
+            };
         }
     }
 }
@@ -523,6 +523,18 @@ mod tests {
             panic!("first sync is full");
         };
         assert_eq!(pixels, &[3, 2, 1, 255, 6, 5, 4, 255]);
+    }
+
+    #[test]
+    fn premultiplied_colour_is_stored_straight() {
+        let texture = LiveTexture::new(1, 1);
+        // Half-covered red, premultiplied: R 128 at alpha 128 is full red.
+        assert!(texture.write(1, 1, 4, PixelFormat::Rgba8, &[128, 0, 0, 128], &[]));
+        let synced = texture.sync(0);
+        let Sync::Full { pixels, .. } = synced.what() else {
+            panic!("first sync is full");
+        };
+        assert_eq!(pixels, &[255, 0, 0, 128]);
     }
 
     #[test]

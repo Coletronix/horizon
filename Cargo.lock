@@ -6692,6 +6692,7 @@ dependencies = [
  "horizon-guest-stack",
  "horizon-mod-api",
  "horizon-mod-host",
+ "horizon-mod-package",
  "mod-wayland_wm",
 ]
 

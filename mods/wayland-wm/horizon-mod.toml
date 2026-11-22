@@ -7,3 +7,10 @@ authors = []
 api = "0.2"
 side = "client"
 capabilities = []
+
+# Pinned to the Nightly this branch starts from; the engine changes it needs (live textures,
+# dmabuf import) aren't in a published build yet, so build it with wayland-wm-dev in this checkout.
+[native]
+game = "26.3"
+horizon = "0a875da91dbb0fdcb7ba8c42c11341aa229af51a"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"

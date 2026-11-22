@@ -254,7 +254,9 @@ struct Out { @builtin(position) clip: vec4<f32>, @location(0) uv: vec2<f32> }
     var uv = in.uv;
     if flags.y == 1u { uv.y = 1.0 - uv.y; }
     let c = textureSampleLevel(source, source_sampler, uv, 0.0);
-    return vec4<f32>(c.rgb, select(c.a, 1.0, flags.x == 1u));
+    if flags.x == 1u { return vec4<f32>(c.rgb, 1.0); }
+    // Stored straight, as every texture the game draws: Wayland's buffers are premultiplied.
+    return select(vec4<f32>(0.0), vec4<f32>(c.rgb / c.a, c.a), c.a > 0.0);
 }
 ";
 

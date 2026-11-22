@@ -17,3 +17,4 @@ mod-api = { package = "horizon-mod-api", path = "../../../crates/horizon-mod-api
 horizon-guest-stack = { path = "../../../crates/horizon-guest-stack" }
 horizon-client = { path = "../../../crates/horizon-client" }
 horizon-mod-host = { path = "../../../crates/horizon-mod-host" }
+horizon-mod-package = { path = "../../../crates/horizon-mod-package", default-features = false }

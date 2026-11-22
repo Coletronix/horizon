@@ -109,8 +109,8 @@ struct HorizonPipelineVertex {
 
 /// The built-in pipeline that draws live textures in the world (`WorldDrawContext::live_quads`):
 /// a mod pipeline's stages around a fragment that samples the texture, filtered, and multiplies
-/// it by the quad's colour. Wayland buffers are premultiplied; the fragment takes the alpha out
-/// so the colour is decoded and blended as every other pipeline's.
+/// it by the quad's colour. Live textures are stored straight, so the colour is decoded and
+/// blended as every other pipeline's.
 pub fn live_shader() -> String {
     format!(
         "{PRELUDE_TYPES}{}{}{ENTRIES}",
@@ -120,8 +120,7 @@ pub fn live_shader() -> String {
 @group(1) @binding(1) var horizon_live_sampler: sampler;
 fn pipeline_fragment(input: PipelineInput) -> vec4<f32> {
     let texel = textureSample(horizon_live_texture, horizon_live_sampler, input.uv);
-    let straight = select(vec3<f32>(0.0), texel.rgb / texel.a, texel.a > 0.0);
-    return vec4<f32>(horizon_decode(straight), texel.a) * input.color;
+    return vec4<f32>(horizon_decode(texel.rgb), texel.a) * input.color;
 }
 "
     )

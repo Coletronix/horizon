@@ -11,9 +11,17 @@
 //! the game.
 #![forbid(unsafe_code)]
 
+/// The mod as the launcher's build declares it: checked against its installed package.
+static BUILT: &[mod_api::__private::native::BuiltMod] = &[mod_api::__private::native::BuiltMod {
+    id: "wayland_wm",
+    version: "0.1.0",
+    side: mod_api::Side::Client,
+}];
+
 fn main() {
     horizon_guest_stack::prepare_main();
     horizon_mod_host::exit_if_compile_child();
+    install_package();
     let startup = horizon_client::entry::prepare();
     horizon_mod_host::main_with(
         vec![mod_api::ModEntry::new(
@@ -21,7 +29,24 @@ fn main() {
             Box::new(wayland_wm::WaylandWm::default()),
         )],
         &[],
-        &[],
+        BUILT,
         startup,
     );
+}
+
+/// Put the mod's package (its manifest) where the game looks for the native mods it was built
+/// with, beside this executable, as the launcher installs it.
+fn install_package() {
+    let manifest = include_str!("../../horizon-mod.toml");
+    let installed = std::env::current_exe().map(|exe| {
+        exe.with_file_name(horizon_mod_package::mod_list::NATIVE_DIR)
+            .join("wayland_wm")
+    });
+    let result = installed.and_then(|dir| {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("horizon-mod.toml"), manifest)
+    });
+    if let Err(error) = result {
+        eprintln!("wayland-wm-dev: the mod's package couldn't be installed: {error}");
+    }
 }
