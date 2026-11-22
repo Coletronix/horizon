@@ -97,5 +97,9 @@ HORIZON_WM_OVERLAY=1 HORIZON_WM_SPAWN=foot \
   the camera started.
 - `HORIZON_WM_SPAWN`: a program to start in the compositor when the game starts.
 
-Not there yet: XWayland (X11 programs), drag and drop, cursor images, popup grabs,
+- **X11 programs** run through XWayland, which the session starts once a game has said which GPU
+  buffers it imports (so X11 programs are accelerated too); `DISPLAY` points at it for programs
+  the session starts. X11 menus and tooltips are popups of the window they belong to.
+
+Not there yet: drag and drop, cursor images, popup grabs,
 fractional scale, running as the login session itself (DRM/KMS, libinput, a fallback desktop).

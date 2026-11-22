@@ -16,6 +16,12 @@ use horizon_wm_ipc::{
     DmabufCaps, Input, LayerInfo, PixelFormat, Region, SurfaceId, ToGame, ToSession, VERSION,
     WindowId, WindowInfo,
 };
+use smithay::wayland::seat::WaylandFocus;
+use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
+use smithay::xwayland::{
+    X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler,
+    xwm::{Reorder, ResizeEdge, XwmId},
+};
 use smithay::{
     backend::allocator::{
         Buffer, Format, Fourcc, Modifier,
@@ -95,6 +101,29 @@ struct Toplevel {
     hits: Vec<(WlSurface, Rectangle<i32, Logical>)>,
     /// Whether the game shows it: a hidden one is suspended and gets no frames.
     visible: bool,
+}
+
+impl Toplevel {
+    /// Its root Wayland surface; an X11 window has one once XWayland associates it.
+    fn surface(&self) -> Option<WlSurface> {
+        self.window.wl_surface().map(|s| s.into_owned())
+    }
+
+    /// Ask it to close, as its close button does.
+    fn close(&self) {
+        if let Some(xdg) = self.window.toplevel() {
+            xdg.send_close();
+        } else if let Some(x11) = self.window.x11_surface() {
+            let _ = x11.close();
+        }
+    }
+
+    /// Send what changed in its pending state (an X11 window has none to send).
+    fn configure(&self) {
+        if let Some(xdg) = self.window.toplevel() {
+            xdg.send_pending_configure();
+        }
+    }
 }
 
 /// What a surface last showed, so a game that (re)connects gets it at once.
@@ -181,6 +210,13 @@ pub struct State {
     /// A menu that asked for a grab, and its window's surface: it has the keyboard, and a click
     /// anywhere else closes it (and every menu of that window).
     popup_grab: Option<(WlSurface, WlSurface)>,
+    /// The X11 window manager, once XWayland is up; its display number for programs.
+    xwm: Option<X11Wm>,
+    x_display: Option<u32>,
+    xwayland_shell: XWaylandShellState,
+    xwayland_started: bool,
+    /// X11 menus and tooltips (override-redirect windows) on screen.
+    x11_menus: Vec<X11Surface>,
     /// Text programs copied, from the threads that read it.
     clipboard_in: calloop::channel::Sender<String>,
     /// Names this run of the session for the game ([`ToGame::Hello`]).
@@ -233,6 +269,7 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
     output.set_preferred(mode);
     let data_device = DataDeviceState::new::<State>(&dh);
     let (clipboard_in, copied) = calloop::channel::channel::<String>();
+    let xwayland_shell = XWaylandShellState::new::<State>(&dh);
 
     let socket = ListeningSocketSource::new_auto().map_err(|e| e.to_string())?;
     let socket_name = socket.socket_name().to_string_lossy().into_owned();
@@ -330,6 +367,11 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
         stopping: false,
         instance: instance_number(),
         popup_grab: None,
+        xwm: None,
+        x_display: None,
+        xwayland_shell,
+        xwayland_started: false,
+        x11_menus: Vec::new(),
         clipboard_in,
         held_spawns: options.spawn.clone(),
     };
@@ -351,11 +393,17 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
         let _ = state.display.flush_clients();
         state.programs.reap();
         state.idle_frames();
+        if state.game_ready() || state.start.elapsed() >= SPAWN_WAIT {
+            state.start_xwayland();
+        }
         if !state.held_spawns.is_empty()
             && (state.game_ready() || state.start.elapsed() >= SPAWN_WAIT)
+            && (state.x_display.is_some() || state.start.elapsed() >= SPAWN_WAIT)
         {
             for command in std::mem::take(&mut state.held_spawns) {
-                state.programs.spawn(&command, &state.socket_name);
+                state
+                    .programs
+                    .spawn(&command, &state.socket_name, state.x_display);
             }
         }
         if state.stopping {
@@ -529,7 +577,7 @@ impl State {
             }
             ToSession::Spawn { command } => {
                 let socket = self.socket_name.clone();
-                self.programs.spawn(&command, &socket);
+                self.programs.spawn(&command, &socket, self.x_display);
             }
         }
     }
@@ -654,14 +702,17 @@ impl State {
     fn frame_done(&mut self) {
         let time = self.time();
         for toplevel in self.toplevels.iter().filter(|t| t.visible) {
-            let surface = toplevel
-                .window
-                .toplevel()
-                .expect("wayland window")
-                .wl_surface();
-            send_frames(surface, time);
-            for (popup, _) in PopupManager::popups_for_surface(surface) {
+            let Some(surface) = toplevel.surface() else {
+                continue;
+            };
+            send_frames(&surface, time);
+            for (popup, _) in PopupManager::popups_for_surface(&surface) {
                 send_frames(popup.wl_surface(), time);
+            }
+        }
+        for menu in &self.x11_menus {
+            if let Some(surface) = menu.wl_surface() {
+                send_frames(&surface, time);
             }
         }
     }
@@ -674,14 +725,60 @@ impl State {
         }
     }
 
+    /// Start XWayland for X11 programs, once: after a game said which GPU buffers it imports
+    /// (XWayland then accelerates X11 programs with them), or when no game came in time.
+    /// Without it the session still runs Wayland programs.
+    fn start_xwayland(&mut self) {
+        if self.xwayland_started {
+            return;
+        }
+        self.xwayland_started = true;
+        let dh = self.display.clone();
+        let handle = self.handle.clone();
+        match XWayland::spawn(
+            &dh,
+            None,
+            std::iter::empty::<(String, String)>(),
+            true,
+            std::process::Stdio::null(),
+            std::process::Stdio::null(),
+            |_| {},
+        ) {
+            Ok((xwayland, client)) => {
+                let inserted = handle.insert_source(
+                    xwayland,
+                    move |event, _, state: &mut State| match event {
+                        XWaylandEvent::Ready {
+                            x11_socket,
+                            display_number,
+                        } => {
+                            match X11Wm::start_wm(state.handle.clone(), x11_socket, client.clone())
+                            {
+                                Ok(wm) => {
+                                    log::info!("X11 programs: DISPLAY=:{display_number}");
+                                    state.xwm = Some(wm);
+                                    state.x_display = Some(display_number);
+                                }
+                                Err(error) => {
+                                    log::warn!("the X11 window manager didn't start: {error}")
+                                }
+                            }
+                        }
+                        XWaylandEvent::Error => log::warn!("XWayland stopped while starting"),
+                    },
+                );
+                if let Err(error) = inserted {
+                    log::warn!("XWayland can't be watched: {error}");
+                }
+            }
+            Err(error) => log::info!("no X11 programs: XWayland didn't start ({error})"),
+        }
+    }
+
     /// Ask every window to close and give programs a moment to.
     fn close_all(&mut self, event_loop: &mut EventLoop<State>) {
         for toplevel in &self.toplevels {
-            toplevel
-                .window
-                .toplevel()
-                .expect("wayland window")
-                .send_close();
+            toplevel.close();
         }
         let deadline = Instant::now() + CLOSE_GRACE;
         while !self.toplevels.is_empty() && Instant::now() < deadline {
@@ -820,21 +917,24 @@ impl State {
             Input::Resize { window, size } => {
                 log::debug!("asking window {} to be {}x{}", window.0, size[0], size[1]);
                 if let Some(toplevel) = self.toplevel(window) {
-                    let surface = toplevel.window.toplevel().expect("wayland window");
-                    surface.with_pending_state(|state| {
-                        state.size =
-                            (size[0] > 0 && size[1] > 0).then(|| (size[0], size[1]).into());
-                    });
-                    surface.send_pending_configure();
+                    if let Some(surface) = toplevel.window.toplevel() {
+                        surface.with_pending_state(|state| {
+                            state.size =
+                                (size[0] > 0 && size[1] > 0).then(|| (size[0], size[1]).into());
+                        });
+                        surface.send_pending_configure();
+                    } else if let Some(x11) = toplevel.window.x11_surface()
+                        && size[0] > 0
+                        && size[1] > 0
+                    {
+                        let at = x11.geometry().loc;
+                        let _ = x11.configure(Rectangle::new(at, (size[0], size[1]).into()));
+                    }
                 }
             }
             Input::Close(window) => {
                 if let Some(toplevel) = self.toplevel(window) {
-                    toplevel
-                        .window
-                        .toplevel()
-                        .expect("wayland window")
-                        .send_close();
+                    toplevel.close();
                 }
             }
             Input::Visible { window, visible } => {
@@ -842,15 +942,16 @@ impl State {
                     && toplevel.visible != visible
                 {
                     toplevel.visible = visible;
-                    let surface = toplevel.window.toplevel().expect("wayland window");
-                    surface.with_pending_state(|state| {
-                        if visible {
-                            state.states.unset(xdg_toplevel::State::Suspended);
-                        } else {
-                            state.states.set(xdg_toplevel::State::Suspended);
-                        }
-                    });
-                    surface.send_pending_configure();
+                    if let Some(surface) = toplevel.window.toplevel() {
+                        surface.with_pending_state(|state| {
+                            if visible {
+                                state.states.unset(xdg_toplevel::State::Suspended);
+                            } else {
+                                state.states.set(xdg_toplevel::State::Suspended);
+                            }
+                        });
+                        surface.send_pending_configure();
+                    }
                 }
             }
         }
@@ -890,20 +991,22 @@ impl State {
             let active = Some(toplevel.id) == self.focused;
             if active != (Some(toplevel.id) == previous) || active {
                 toplevel.window.set_activated(active);
-                toplevel
-                    .window
-                    .toplevel()
-                    .expect("wayland window")
-                    .send_pending_configure();
+                toplevel.configure();
             }
         }
-        let surface = self.focused.and_then(|id| self.toplevel(id)).map(|t| {
-            t.window
-                .toplevel()
-                .expect("wayland window")
-                .wl_surface()
-                .clone()
-        });
+        // An X11 window with the keyboard goes on top of the X11 stack too.
+        if let Some(x11) = self
+            .focused
+            .and_then(|id| self.toplevel(id))
+            .and_then(|t| t.window.x11_surface().cloned())
+            && let Some(xwm) = &mut self.xwm
+        {
+            let _ = xwm.raise_window(&x11);
+        }
+        let surface = self
+            .focused
+            .and_then(|id| self.toplevel(id))
+            .and_then(Toplevel::surface);
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, surface, serial);
         self.dirty = true;
@@ -1073,88 +1176,36 @@ impl State {
 
     /// The window list, to the game.
     fn publish(&mut self) {
-        let parents: Vec<(WlSurface, WindowId)> = self
+        let parents: Vec<(Option<WlSurface>, Option<u32>, WindowId)> = self
             .toplevels
             .iter()
             .map(|t| {
                 (
-                    t.window
-                        .toplevel()
-                        .expect("wayland window")
-                        .wl_surface()
-                        .clone(),
+                    t.surface(),
+                    t.window.x11_surface().map(|x| x.window_id()),
                     t.id,
                 )
             })
             .collect();
         let focused = self.focused;
+        let menus = self.x11_menus.clone();
+        let focused_x11 = focused
+            .and_then(|id| self.toplevel(id))
+            .and_then(|t| t.window.x11_surface().cloned());
         let windows: Vec<WindowInfo> = self
             .toplevels
             .iter_mut()
-            .map(|toplevel| {
-                let surface = toplevel.window.toplevel().expect("wayland window").clone();
-                let (title, app_id) = with_states(surface.wl_surface(), |states| {
-                    let data = states
-                        .data_map
-                        .get::<XdgToplevelSurfaceData>()
-                        .map(|d| d.lock().unwrap_or_else(|p| p.into_inner()));
-                    data.map(|d| {
-                        (
-                            d.title.clone().unwrap_or_default(),
-                            d.app_id.clone().unwrap_or_default(),
-                        )
-                    })
-                    .unwrap_or_default()
-                });
-                // The window's own surfaces in the root surface's space first: its visible area
-                // is what xdg geometry says, else all of them.
-                let mut layers = Vec::new();
-                let mut hits = Vec::new();
-                collect_layers(
-                    surface.wl_surface(),
-                    (0, 0).into(),
-                    false,
-                    &mut layers,
-                    &mut hits,
-                );
-                let geometry = with_states(surface.wl_surface(), |states| {
-                    states
-                        .cached_state
-                        .get::<smithay::wayland::shell::xdg::SurfaceCachedState>()
-                        .current()
-                        .geometry
-                })
-                .unwrap_or_else(|| {
-                    hits.iter()
-                        .map(|(_, rect)| *rect)
-                        .reduce(|a: Rectangle<i32, Logical>, b| a.merge(b))
-                        .unwrap_or_default()
-                });
-                // Then the window's space: its geometry's corner is (0, 0).
-                for layer in &mut layers {
-                    layer.at = [layer.at[0] - geometry.loc.x, layer.at[1] - geometry.loc.y];
-                }
-                for (_, rect) in &mut hits {
-                    rect.loc -= geometry.loc;
-                }
-                for (popup, at) in PopupManager::popups_for_surface(surface.wl_surface()) {
-                    // Popup offsets are from the window's geometry already.
-                    let at = at - popup.geometry().loc;
-                    collect_layers(popup.wl_surface(), at, true, &mut layers, &mut hits);
-                }
-                toplevel.hits = hits;
-                let parent = surface
-                    .parent()
-                    .and_then(|p| parents.iter().find(|(s, _)| *s == p).map(|(_, id)| *id));
-                WindowInfo {
-                    id: toplevel.id,
-                    title,
-                    app_id,
-                    size: [geometry.size.w, geometry.size.h],
+            .filter_map(|toplevel| {
+                let info = if let Some(xdg) = toplevel.window.toplevel().cloned() {
+                    xdg_window(toplevel, &xdg, &parents)
+                } else {
+                    let x11 = toplevel.window.x11_surface()?.clone();
+                    x11_window(toplevel, &x11, &parents, &menus, focused_x11.as_ref())
+                };
+                Some(WindowInfo {
                     focused: focused == Some(toplevel.id),
-                    parent,
-                    layers,
-                }
+                    ..info
+                })
             })
             .collect();
         let shapes: Vec<_> = windows
@@ -1175,6 +1226,125 @@ impl State {
         }
         self.logged = shapes;
         self.send(ToGame::Windows(windows), &[], Vec::new());
+    }
+}
+
+/// An xdg toplevel's info: its surfaces in its geometry's space, popups included; it keeps
+/// what the pointer can be over.
+fn xdg_window(
+    toplevel: &mut Toplevel,
+    surface: &ToplevelSurface,
+    parents: &[(Option<WlSurface>, Option<u32>, WindowId)],
+) -> WindowInfo {
+    let (title, app_id) = with_states(surface.wl_surface(), |states| {
+        let data = states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .map(|d| d.lock().unwrap_or_else(|p| p.into_inner()));
+        data.map(|d| {
+            (
+                d.title.clone().unwrap_or_default(),
+                d.app_id.clone().unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default()
+    });
+    // The window's own surfaces in the root surface's space first: its visible area is what xdg
+    // geometry says, else all of them.
+    let mut layers = Vec::new();
+    let mut hits = Vec::new();
+    collect_layers(
+        surface.wl_surface(),
+        (0, 0).into(),
+        false,
+        &mut layers,
+        &mut hits,
+    );
+    let geometry = with_states(surface.wl_surface(), |states| {
+        states
+            .cached_state
+            .get::<smithay::wayland::shell::xdg::SurfaceCachedState>()
+            .current()
+            .geometry
+    })
+    .unwrap_or_else(|| {
+        hits.iter()
+            .map(|(_, rect)| *rect)
+            .reduce(|a: Rectangle<i32, Logical>, b| a.merge(b))
+            .unwrap_or_default()
+    });
+    // Then the window's space: its geometry's corner is (0, 0).
+    for layer in &mut layers {
+        layer.at = [layer.at[0] - geometry.loc.x, layer.at[1] - geometry.loc.y];
+    }
+    for (_, rect) in &mut hits {
+        rect.loc -= geometry.loc;
+    }
+    for (popup, at) in PopupManager::popups_for_surface(surface.wl_surface()) {
+        // Popup offsets are from the window's geometry already.
+        let at = at - popup.geometry().loc;
+        collect_layers(popup.wl_surface(), at, true, &mut layers, &mut hits);
+    }
+    toplevel.hits = hits;
+    let parent = surface.parent().and_then(|p| {
+        parents
+            .iter()
+            .find(|(s, _, _)| s.as_ref() == Some(&p))
+            .map(|(_, _, id)| *id)
+    });
+    WindowInfo {
+        id: toplevel.id,
+        title,
+        app_id,
+        size: [geometry.size.w, geometry.size.h],
+        focused: false,
+        parent,
+        layers,
+    }
+}
+
+/// An X11 window's info: its surface (and its subsurfaces) at the corner, and its menus and
+/// tooltips (override-redirect windows, placed in X11's root space) where they lie relative to
+/// it. A menu belongs to the window it is transient for, else to the X11 window with the
+/// keyboard.
+fn x11_window(
+    toplevel: &mut Toplevel,
+    x11: &X11Surface,
+    parents: &[(Option<WlSurface>, Option<u32>, WindowId)],
+    menus: &[X11Surface],
+    focused: Option<&X11Surface>,
+) -> WindowInfo {
+    let geometry = x11.geometry();
+    let mut layers = Vec::new();
+    let mut hits = Vec::new();
+    if let Some(surface) = toplevel.surface() {
+        collect_layers(&surface, (0, 0).into(), false, &mut layers, &mut hits);
+    }
+    for menu in menus {
+        let ours = match menu.is_transient_for() {
+            Some(owner) => owner == x11.window_id(),
+            None => focused == Some(x11),
+        };
+        if ours && let Some(surface) = menu.wl_surface() {
+            let at = menu.geometry().loc - geometry.loc;
+            collect_layers(&surface, at, true, &mut layers, &mut hits);
+        }
+    }
+    toplevel.hits = hits;
+    let parent = x11.is_transient_for().and_then(|owner| {
+        parents
+            .iter()
+            .find(|(_, x, _)| *x == Some(owner))
+            .map(|(_, _, id)| *id)
+    });
+    WindowInfo {
+        id: toplevel.id,
+        title: x11.title(),
+        app_id: x11.class(),
+        size: [geometry.size.w, geometry.size.h],
+        focused: false,
+        parent,
+        layers,
     }
 }
 
@@ -1394,9 +1564,13 @@ impl CompositorHandler for State {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        // XWayland is the one client smithay inserts itself, with its own data.
+        if let Some(xwayland) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &xwayland.compositor_state;
+        }
         &client
             .get_data::<ClientState>()
-            .expect("every client is inserted with ClientState")
+            .expect("every client but XWayland is inserted with ClientState")
             .compositor
     }
 
@@ -1443,11 +1617,12 @@ impl CompositorHandler for State {
         if let Some(toplevel) = self
             .toplevels
             .iter()
-            .find(|t| t.window.toplevel().is_some_and(|s| s.wl_surface() == &root))
+            .find(|t| t.surface().as_ref() == Some(&root))
         {
             toplevel.window.on_commit();
-            let surface = toplevel.window.toplevel().expect("wayland window");
-            if !surface.is_initial_configure_sent() {
+            if let Some(surface) = toplevel.window.toplevel()
+                && !surface.is_initial_configure_sent()
+            {
                 surface.send_configure();
             }
         }
@@ -1699,6 +1874,142 @@ impl DmabufHandler for State {
     }
 }
 
+impl XWaylandShellHandler for State {
+    fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
+        &mut self.xwayland_shell
+    }
+}
+
+/// The X11 window manager: X11 windows are windows like Wayland ones; their menus and
+/// tooltips are popups of the window they belong to.
+impl XwmHandler for State {
+    fn xwm_state(&mut self, _xwm: XwmId) -> &mut X11Wm {
+        self.xwm
+            .as_mut()
+            .expect("X11 events come from a running window manager")
+    }
+
+    fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
+
+    fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
+
+    fn map_window_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if window.set_mapped(true).is_err() {
+            return;
+        }
+        let id = WindowId(self.next_window);
+        self.next_window += 1;
+        log::info!("window {} opened (X11)", id.0);
+        self.toplevels.push(Toplevel {
+            id,
+            window: smithay::desktop::Window::new_x11_window(window),
+            hits: Vec::new(),
+            visible: true,
+        });
+        self.dirty = true;
+    }
+
+    fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.x11_menus.push(window);
+        self.dirty = true;
+    }
+
+    fn unmapped_window(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.forget_x11(&window);
+        if !window.is_override_redirect() {
+            let _ = window.set_mapped(false);
+        }
+    }
+
+    fn destroyed_window(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.forget_x11(&window);
+    }
+
+    fn configure_request(
+        &mut self,
+        _xwm: XwmId,
+        window: X11Surface,
+        x: Option<i32>,
+        y: Option<i32>,
+        w: Option<u32>,
+        h: Option<u32>,
+        _reorder: Option<Reorder>,
+    ) {
+        // Where it wants to be in X11's space, and the size it asks for: granted.
+        let mut rect = window.geometry();
+        if let Some(x) = x {
+            rect.loc.x = x;
+        }
+        if let Some(y) = y {
+            rect.loc.y = y;
+        }
+        if let Some(w) = w {
+            rect.size.w = w as i32;
+        }
+        if let Some(h) = h {
+            rect.size.h = h as i32;
+        }
+        let _ = window.configure(rect);
+        self.dirty = true;
+    }
+
+    fn configure_notify(
+        &mut self,
+        _xwm: XwmId,
+        _window: X11Surface,
+        _geometry: Rectangle<i32, Logical>,
+        _above: Option<u32>,
+    ) {
+        self.dirty = true;
+    }
+
+    fn property_notify(
+        &mut self,
+        _xwm: XwmId,
+        _window: X11Surface,
+        _property: smithay::xwayland::xwm::WmWindowProperty,
+    ) {
+        self.dirty = true;
+    }
+
+    fn resize_request(
+        &mut self,
+        _xwm: XwmId,
+        _window: X11Surface,
+        _button: u32,
+        _edge: ResizeEdge,
+    ) {
+        // Windows are resized from their bezel in the world.
+    }
+
+    fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {
+        // Windows are carried in the world.
+    }
+}
+
+impl State {
+    /// An X11 window or menu went away.
+    fn forget_x11(&mut self, window: &X11Surface) {
+        self.x11_menus.retain(|m| m != window);
+        let gone: Vec<WindowId> = self
+            .toplevels
+            .iter()
+            .filter(|t| t.window.x11_surface() == Some(window))
+            .map(|t| t.id)
+            .collect();
+        for id in &gone {
+            log::info!("window {} closed (X11)", id.0);
+        }
+        self.toplevels
+            .retain(|t| t.window.x11_surface() != Some(window));
+        if self.focused.is_some_and(|id| gone.contains(&id)) {
+            self.focused = None;
+        }
+        self.dirty = true;
+    }
+}
+
+smithay::delegate_xwayland_shell!(State);
 delegate_compositor!(State);
 delegate_shm!(State);
 delegate_xdg_shell!(State);

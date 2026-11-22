@@ -3,7 +3,7 @@ use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 /// The environment that makes toolkits open their windows in this session.
-pub fn session_command(command: &str, socket: &str) -> Command {
+pub fn session_command(command: &str, socket: &str, x_display: Option<u32>) -> Command {
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg(command)
@@ -14,8 +14,11 @@ pub fn session_command(command: &str, socket: &str) -> Command {
         .env("SDL_VIDEODRIVER", "wayland")
         .env("MOZ_ENABLE_WAYLAND", "1")
         .env("ELECTRON_OZONE_PLATFORM_HINT", "wayland")
-        // No X server of ours yet: an X program must not open on another desktop.
+        // X11 programs open in the session's XWayland, never on another desktop.
         .env_remove("DISPLAY");
+    if let Some(display) = x_display {
+        cmd.env("DISPLAY", format!(":{display}"));
+    }
     cmd
 }
 
@@ -26,8 +29,8 @@ pub struct Programs {
 }
 
 impl Programs {
-    pub fn spawn(&mut self, command: &str, socket: &str) {
-        match session_command(command, socket).spawn() {
+    pub fn spawn(&mut self, command: &str, socket: &str, x_display: Option<u32>) {
+        match session_command(command, socket, x_display).spawn() {
             Ok(child) => {
                 log::info!("started `{command}` (pid {})", child.id());
                 self.children.push(child);
