@@ -44,6 +44,5 @@ with the game's own controls.
 
 ## Not yet
 
-Survival items (a picked-up window as an item, closing when the item is destroyed), app items and
-the launcher block, monitor blocks, wax and item frames, leads, snapping and arcs, cursor images,
-drag and drop, per-world placement.
+Windows in item frames, the automation blocks (folders, file processors, window sensors),
+desktop notifications as toasts, and per-player sharing on multiplayer servers.
