@@ -13,8 +13,9 @@ path = "src/main.rs"
 [dependencies]
 horizon-wm-ipc = { path = "../horizon-wm-ipc" }
 log = { version = "0.4", features = ["std"] }
+png = "0.18"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-smithay = { version = "0.7", default-features = false, features = ["wayland_frontend", "desktop", "xwayland"] }
+smithay = { version = "0.7", default-features = false, features = ["wayland_frontend", "desktop", "xwayland", "renderer_gl", "backend_winit", "backend_drm", "backend_gbm", "backend_egl", "backend_libinput", "backend_udev", "backend_session_libseat"] }
 calloop = { version = "0.14", features = ["signals"] }
-rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "process", "net"] }

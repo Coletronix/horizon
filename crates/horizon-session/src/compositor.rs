@@ -9,6 +9,9 @@
 //! and the buffer goes back to its program once the game's GPU has copied it.
 #![allow(unsafe_code)]
 
+#[path = "display.rs"]
+mod display;
+
 use crate::Options;
 use crate::game::GameConn;
 use crate::programs::{GameExit, Programs, Supervised};
@@ -101,6 +104,9 @@ struct Toplevel {
     hits: Vec<(WlSurface, Rectangle<i32, Logical>)>,
     /// Whether the game shows it: a hidden one is suspended and gets no frames.
     visible: bool,
+    /// The game's own window, when the session has a screen: shown full screen, never sent to
+    /// the game as a window.
+    game: bool,
 }
 
 impl Toplevel {
@@ -154,6 +160,8 @@ struct SurfaceData {
     held: Option<(WlBuffer, u64)>,
     /// This surface's dmabufs sent so far.
     seq: u64,
+    /// Bumped whenever its content changes: the screen's textures follow it.
+    version: u64,
 }
 
 /// A message for the game, built where the state can't be borrowed.
@@ -215,8 +223,18 @@ pub struct State {
     x_display: Option<u32>,
     xwayland_shell: XWaylandShellState,
     xwayland_started: bool,
+    /// The dmabuf formats offered were narrowed to the game's.
+    dmabuf_narrowed: bool,
+    /// Globals no longer offered, kept for the programs bound to them.
+    old_dmabuf_globals: Vec<DmabufGlobal>,
     /// X11 menus and tooltips (override-redirect windows) on screen.
     x11_menus: Vec<X11Surface>,
+    /// The session's own screen, with `--display`.
+    screen: Option<display::Screen>,
+    /// The game's process, from its control connection: its window is the one the screen shows.
+    game_pid: Option<u32>,
+    _relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState,
+    _pointer_constraints: smithay::wayland::pointer_constraints::PointerConstraintsState,
     /// The pointer's image as the program under it set it, and what the game was last told.
     cursor: CursorImageStatus,
     cursor_sent: Option<(Option<SurfaceId>, [i32; 2])>,
@@ -331,11 +349,19 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
             state.stopping = true;
         })
         .map_err(|e| e.to_string())?;
+    // SIGUSR1 toggles the fallback desktop, as the escape chord does: from another console or
+    // over ssh, `pkill -USR1 horizon-session` reaches the programs whatever the screen shows.
+    let toggle = calloop::signals::Signals::new(&[calloop::signals::Signal::SIGUSR1])
+        .map_err(|e| format!("signals: {e}"))?;
+    handle
+        .insert_source(toggle, |_, _, state: &mut State| state.toggle_fallback())
+        .map_err(|e| e.to_string())?;
 
     log::info!(
         "listening: WAYLAND_DISPLAY={socket_name}, game control {}",
         control.display()
     );
+    let dh2 = dh.clone();
     let mut state = State {
         display: dh,
         compositor,
@@ -374,18 +400,47 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
         x_display: None,
         xwayland_shell,
         xwayland_started: false,
+        dmabuf_narrowed: false,
+        old_dmabuf_globals: Vec::new(),
         x11_menus: Vec::new(),
+        screen: None,
+        game_pid: None,
+        _relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState::new::<
+            State,
+        >(&dh2),
+        _pointer_constraints: smithay::wayland::pointer_constraints::PointerConstraintsState::new::<
+            State,
+        >(&dh2),
         cursor: CursorImageStatus::default_named(),
         cursor_sent: None,
         clipboard_in,
         held_spawns: options.spawn.clone(),
     };
-    let mut supervised = (!options.game.is_empty())
-        .then(|| Supervised::new(options.game.clone(), control.display().to_string()));
+    if let Some(crate::Screen::Window) = options.display {
+        display::start_window(&mut state, &mut event_loop)?;
+    }
+    // With a screen, the game is a program of the session too.
+    let game_env: Vec<(String, String)> = match options.display {
+        Some(_) => vec![("WAYLAND_DISPLAY".into(), state.socket_name.clone())],
+        None => Vec::new(),
+    };
+    let mut supervised = (!options.game.is_empty()).then(|| {
+        Supervised::new(
+            options.game.clone(),
+            control.display().to_string(),
+            game_env,
+        )
+    });
 
     let result = loop {
         let busy = state.game.as_ref().is_some_and(GameConn::pending);
-        let timeout = Duration::from_millis(if busy { 2 } else { 50 });
+        let timeout = Duration::from_millis(if busy {
+            2
+        } else if state.screen.is_some() {
+            4
+        } else {
+            50
+        });
         if let Err(error) = event_loop.dispatch(Some(timeout), &mut state) {
             break Err(error.to_string());
         }
@@ -395,6 +450,7 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
             state.publish();
         }
         state.flush_game();
+        state.render_screen();
         let _ = state.display.flush_clients();
         state.programs.reap();
         state.idle_frames();
@@ -514,7 +570,11 @@ impl State {
             return;
         }
         log::info!("a game connected");
+        self.game_pid = rustix::net::sockopt::socket_peercred(conn.stream())
+            .ok()
+            .map(|cred| cred.pid.as_raw_nonzero().get() as u32);
         self.game = Some(conn);
+        self.configure_game();
     }
 
     fn game_readable(&mut self, id: u64) -> PostAction {
@@ -641,8 +701,19 @@ impl State {
     /// Offer dmabufs in the layouts the game's GPU imports. Programs started before that draw to
     /// shared memory.
     fn offer_dmabufs(&mut self, caps: &DmabufCaps) {
-        if self.dmabuf_global.is_some() {
-            return;
+        if let Some(global) = self.dmabuf_global.take() {
+            if !self.dmabuf_narrowed && self.screen.is_some() {
+                // The screen offered what it imports, for the game's own window; programs that
+                // start now get what the game imports too, so they can stand in its world.
+                // Hidden from programs that connect from now on; the ones using it (the
+                // game's own window) keep it.
+                self.dmabuf_narrowed = true;
+                self.dmabuf.disable_global::<State>(&self.display, &global);
+                self.old_dmabuf_globals.push(global);
+            } else {
+                self.dmabuf_global = Some(global);
+                return;
+            }
         }
         let formats: Vec<Format> = caps
             .formats
@@ -724,7 +795,7 @@ impl State {
 
     fn frame_done(&mut self) {
         let time = self.time();
-        for toplevel in self.toplevels.iter().filter(|t| t.visible) {
+        for toplevel in self.toplevels.iter().filter(|t| t.visible && !t.game) {
             let Some(surface) = toplevel.surface() else {
                 continue;
             };
@@ -1110,7 +1181,15 @@ impl State {
                 (dmabuf, id)
             })
             .collect();
-        let ready = self.game_ready();
+        // The game's own window isn't sent to it; its buffers stay held for the screen until
+        // replaced.
+        let own = self.game_pid.is_some_and(|pid| {
+            root.client()
+                .and_then(|c| c.get_credentials(&self.display).ok())
+                .is_some_and(|c| c.pid as u32 == pid)
+        });
+        let ready = self.game_ready() && !own;
+        let screen = self.screen.is_some();
         let mut out: Vec<Outgoing> = Vec::new();
         let mut new_surfaces = Vec::new();
         let mut changed = false;
@@ -1136,9 +1215,11 @@ impl State {
                         content: Content::Empty,
                         held: None,
                         seq: 0,
+                        version: 0,
                     })
                 });
                 let mut data = data.lock().unwrap_or_else(|p| p.into_inner());
+                data.version += 1;
                 match assignment {
                     BufferAssignment::Removed => {
                         changed |= data.mapped;
@@ -1154,8 +1235,10 @@ impl State {
                             .iter()
                             .find(|(d, _)| *d == dmabuf)
                             .map_or(0, |(_, id)| *id);
-                        if dmabuf.num_planes() != 1 {
-                            log::warn!("a multi-plane dmabuf can't be shown yet");
+                        // The game imports one-plane buffers; the session's own screen takes any.
+                        let one_plane = dmabuf.num_planes() == 1;
+                        if !one_plane && !own && !screen {
+                            log::warn!("a multi-plane dmabuf can't be shown in the game");
                             buffer.release();
                             return;
                         }
@@ -1166,7 +1249,7 @@ impl State {
                         changed |= !data.mapped || data.size != size;
                         data.size = size;
                         data.mapped = true;
-                        let message = ready
+                        let message = (ready && one_plane)
                             .then(|| dmabuf_message(data.id, buffer_id, data.seq + 1, &dmabuf))
                             .flatten();
                         match message {
@@ -1176,6 +1259,14 @@ impl State {
                                 let seq = data.seq;
                                 // The one it replaces won't be read again.
                                 if let Some((old, _)) = data.held.replace((buffer.clone(), seq))
+                                    && old != buffer
+                                {
+                                    old.release();
+                                }
+                            }
+                            None if own || screen => {
+                                // Held for the screen, given back once the next replaces it.
+                                if let Some((old, _)) = data.held.replace((buffer.clone(), 0))
                                     && old != buffer
                                 {
                                     old.release();
@@ -1251,6 +1342,7 @@ impl State {
         let windows: Vec<WindowInfo> = self
             .toplevels
             .iter_mut()
+            .filter(|t| !t.game)
             .filter_map(|toplevel| {
                 let info = if let Some(xdg) = toplevel.window.toplevel().cloned() {
                     xdg_window(toplevel, &xdg, &parents)
@@ -1746,7 +1838,9 @@ impl XdgShellHandler for State {
             window: smithay::desktop::Window::new_wayland_window(surface),
             hits: Vec::new(),
             visible: true,
+            game: false,
         });
+        self.configure_game();
         self.dirty = true;
     }
 
@@ -1965,6 +2059,7 @@ impl XwmHandler for State {
             window: smithay::desktop::Window::new_x11_window(window),
             hits: Vec::new(),
             visible: true,
+            game: false,
         });
         self.dirty = true;
     }
@@ -2069,6 +2164,27 @@ impl State {
     }
 }
 
+impl smithay::wayland::pointer_constraints::PointerConstraintsHandler for State {
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        // The game locks the pointer to look around: granted at once.
+        smithay::wayland::pointer_constraints::with_pointer_constraint(surface, pointer, |c| {
+            if let Some(c) = c {
+                c.activate();
+            }
+        });
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+    }
+}
+
+smithay::delegate_pointer_constraints!(State);
+smithay::delegate_relative_pointer!(State);
 smithay::delegate_xwayland_shell!(State);
 delegate_compositor!(State);
 delegate_shm!(State);

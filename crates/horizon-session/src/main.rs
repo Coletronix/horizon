@@ -14,6 +14,10 @@
 //!   game started the session itself and is gone).
 //! - `--spawn CMD`: a program to start at once.
 //! - `--control PATH`: the control socket (default `$XDG_RUNTIME_DIR/horizon-session.sock`).
+//! - `--display window|drm`: the session shows itself: in a window on another desktop, or on the
+//!   computer's screens from a text console. The game is then a program of the session, shown
+//!   full screen; Ctrl+Alt+Backspace switches to a plain desktop of every window and back.
+//!   Without it, the game shows the windows itself, wherever it runs.
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -26,9 +30,19 @@ mod logger;
 #[cfg(target_os = "linux")]
 mod programs;
 
+/// Where the session shows itself, with `--display`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    /// A window on the desktop the session runs on.
+    Window,
+    /// The computer's screens, from a text console.
+    Drm,
+}
+
 /// What the command line asked for.
 #[derive(Debug, Default, PartialEq)]
 pub struct Options {
+    pub display: Option<Screen>,
     pub control: Option<PathBuf>,
     pub linger: Option<Duration>,
     pub spawn: Vec<String>,
@@ -49,6 +63,15 @@ impl Options {
                     options.linger = Some(Duration::from_secs(secs));
                 }
                 "--spawn" => options.spawn.push(value("--spawn")?),
+                "--display" => {
+                    options.display = Some(match value("--display")?.as_str() {
+                        "window" => Screen::Window,
+                        "drm" => Screen::Drm,
+                        other => {
+                            return Err(format!("--display takes window or drm, not {other:?}"));
+                        }
+                    })
+                }
                 "--" => {
                     options.game = args.collect();
                     break;

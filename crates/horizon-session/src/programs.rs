@@ -57,6 +57,8 @@ pub enum GameExit {
 pub struct Supervised {
     args: Vec<String>,
     control: String,
+    /// More environment for the game: with a screen, the session's `WAYLAND_DISPLAY`.
+    env: Vec<(String, String)>,
     child: Option<Child>,
     crashes: Vec<Instant>,
     restart_at: Option<Instant>,
@@ -67,10 +69,11 @@ const CRASH_WINDOW: Duration = Duration::from_secs(120);
 const MAX_CRASHES: usize = 4;
 
 impl Supervised {
-    pub fn new(args: Vec<String>, control: String) -> Self {
+    pub fn new(args: Vec<String>, control: String, env: Vec<(String, String)>) -> Self {
         let mut game = Supervised {
             args,
             control,
+            env,
             child: None,
             crashes: Vec::new(),
             restart_at: None,
@@ -86,6 +89,7 @@ impl Supervised {
         match Command::new(program)
             .args(rest)
             .env(horizon_wm_ipc::SESSION_ENV, &self.control)
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
             .spawn()
         {
             Ok(child) => {
