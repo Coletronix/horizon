@@ -3686,6 +3686,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mod-wm_world"
+version = "0.1.0"
+dependencies = [
+ "horizon-mod-api",
+ "log",
+ "mod-wayland_wm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6715,6 +6726,7 @@ dependencies = [
  "horizon-mod-host",
  "horizon-mod-package",
  "mod-wayland_wm",
+ "mod-wm_world",
 ]
 
 [[package]]

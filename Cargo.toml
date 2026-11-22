@@ -12,6 +12,7 @@ members = [
     "crates/horizon-wm-ipc",
     "crates/horizon-session",
     "mods/wayland-wm",
+    "mods/wm-world",
     "mods/wayland-wm/dev",
     "crates/horizon-mod-host",
     "crates/horizon-game",

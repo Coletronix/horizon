@@ -107,6 +107,7 @@ pub fn register_presenter(presenter: Arc<dyn Presenter>) {
 /// The game's link to the session ([`wm`]).
 pub struct Wm {
     socket: Mutex<Option<String>>,
+    instance: AtomicU64,
     windows: Mutex<Arc<Vec<Window>>>,
     generation: AtomicU64,
     #[cfg(target_os = "linux")]
@@ -127,6 +128,7 @@ fn start() -> Option<&'static Wm> {
     {
         let wm: &'static Wm = Box::leak(Box::new(Wm {
             socket: Mutex::new(None),
+            instance: AtomicU64::new(0),
             windows: Mutex::new(Arc::new(Vec::new())),
             generation: AtomicU64::new(0),
             link: session::Link::default(),
@@ -183,8 +185,15 @@ impl Wm {
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    fn connected_to(&self, socket: String) {
+    fn connected_to(&self, socket: String, instance: u64) {
+        self.instance.store(instance, Ordering::Release);
         *self.socket.lock().unwrap_or_else(|p| p.into_inner()) = Some(socket);
+    }
+
+    /// A number naming the connected run of the session (0 before the first connection): while it
+    /// stays the same, a [`WindowId`] names the same window, across game restarts too.
+    pub fn session_instance(&self) -> u64 {
+        self.instance.load(Ordering::Acquire)
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

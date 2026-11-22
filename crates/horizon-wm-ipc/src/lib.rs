@@ -19,7 +19,7 @@ use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 
 /// Bumped when a message changes shape; both ends refuse a peer with another version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The variable the session sets for the game it starts: its control socket's path.
 pub const SESSION_ENV: &str = "HORIZON_SESSION";
@@ -158,8 +158,14 @@ pub enum ToSession {
 /// What the session tells the game.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ToGame {
-    /// The answer to [`ToSession::Hello`]: the session's version and its `WAYLAND_DISPLAY`.
-    Hello { version: u32, socket: String },
+    /// The answer to [`ToSession::Hello`]: the session's version, its `WAYLAND_DISPLAY`, and a
+    /// number naming this run of the session: window ids mean the same windows while it stays
+    /// the same (a game that restarts can keep where it put them).
+    Hello {
+        version: u32,
+        socket: String,
+        instance: u64,
+    },
     /// New shared-memory pixels for `surface`, a `width` × `height` buffer in `format`. The payload
     /// holds each region's rows in turn, `region.width * 4` bytes each; no regions means the whole
     /// buffer, `width * 4` bytes a row.
@@ -372,6 +378,7 @@ mod tests {
                 &ToGame::Hello {
                     version: VERSION,
                     socket: "wayland-9".into(),
+                    instance: 7,
                 },
                 &[],
                 vec![],

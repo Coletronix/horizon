@@ -100,6 +100,7 @@
     "horizon-wm-ipc": "horizon",
     "horizon-session": "horizon",
     "mod-wayland_wm": "horizon",
+    "mod-wm_world": "horizon",
     "wayland-wm-dev": "tool",
     "horizon-game": "platform",
     "horizon-mod-host": "platform",

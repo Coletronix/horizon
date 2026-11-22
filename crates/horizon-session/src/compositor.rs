@@ -177,6 +177,8 @@ pub struct State {
     programs: Programs,
     /// A signal asked the session to end.
     stopping: bool,
+    /// Names this run of the session for the game ([`ToGame::Hello`]).
+    instance: u64,
     /// `--spawn` programs, held until a game says which GPU buffers it imports (else GPU programs
     /// would settle for shared memory), or until [`SPAWN_WAIT`] is up.
     held_spawns: Vec<String>,
@@ -312,6 +314,7 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
         last_idle_frame: Instant::now(),
         programs: Programs::default(),
         stopping: false,
+        instance: instance_number(),
         held_spawns: options.spawn.clone(),
     };
     let mut supervised = (!options.game.is_empty())
@@ -362,6 +365,14 @@ pub fn run(options: Options) -> Result<ExitCode, String> {
     };
     let _ = std::fs::remove_file(&control);
     result
+}
+
+/// A number unlikely to name another run: the start time's nanoseconds and the process id.
+fn instance_number() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    nanos ^ (u64::from(std::process::id()) << 40)
 }
 
 /// Listen on `path`, unless another session already does.
@@ -484,6 +495,7 @@ impl State {
                         &ToGame::Hello {
                             version: VERSION,
                             socket,
+                            instance: self.instance,
                         },
                         &[],
                         vec![],

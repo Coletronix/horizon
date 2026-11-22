@@ -1,0 +1,18 @@
+[package]
+name = "mod-wm_world"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Desktop windows as things in the world: look to point, click to type, carry, resize and put them away"
+
+[lib]
+name = "wm_world"
+path = "src/lib.rs"
+
+[dependencies]
+horizon-mod-api = { path = "../../crates/horizon-mod-api" }
+wayland_wm = { package = "mod-wayland_wm", path = "../wayland-wm" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"

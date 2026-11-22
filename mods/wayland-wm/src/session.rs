@@ -93,6 +93,9 @@ pub(crate) fn start(wm: &'static Wm) -> Result<(), String> {
                         started = false;
                         if let Err(error) = serve(wm, stream) {
                             log::warn!("wayland_wm: the session's connection ended: {error}");
+                            // A session that refuses this game (another protocol) isn't asked
+                            // again at once.
+                            std::thread::sleep(Duration::from_secs(5));
                         }
                         wm.disconnected();
                     }
@@ -177,7 +180,11 @@ fn serve(wm: &Wm, stream: UnixStream) -> std::io::Result<()> {
         }
         while let Some(received) = reader.next_message::<ToGame>()? {
             match received.message {
-                ToGame::Hello { version, socket } => {
+                ToGame::Hello {
+                    version,
+                    socket,
+                    instance,
+                } => {
                     if version != VERSION {
                         return Err(std::io::Error::other(format!(
                             "the session speaks protocol {version}, the game {VERSION}"
@@ -187,7 +194,7 @@ fn serve(wm: &Wm, stream: UnixStream) -> std::io::Result<()> {
                         "wayland_wm: connected to the session in {:?}: WAYLAND_DISPLAY={socket}",
                         connected.elapsed()
                     );
-                    wm.connected_to(socket);
+                    wm.connected_to(socket, instance);
                 }
                 ToGame::Pixels {
                     surface,

@@ -13,6 +13,7 @@ test = false
 
 [dependencies]
 wayland_wm = { package = "mod-wayland_wm", path = ".." }
+wm_world = { package = "mod-wm_world", path = "../../wm-world" }
 mod-api = { package = "horizon-mod-api", path = "../../../crates/horizon-mod-api" }
 horizon-guest-stack = { path = "../../../crates/horizon-guest-stack" }
 horizon-client = { path = "../../../crates/horizon-client" }
